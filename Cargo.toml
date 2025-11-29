@@ -1,0 +1,17 @@
+[package]
+name = "contatori"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+atomic-traits = "0.4.0"
+bytemuck = "1.24.0"
+crossbeam-utils = "0.8.21"
+num-traits = "0.2.19"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "counter_benchmark"
+harness = false
