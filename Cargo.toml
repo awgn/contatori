@@ -2,6 +2,12 @@
 name = "contatori"
 version = "0.1.0"
 edition = "2021"
+description = "High-performance sharded atomic counters for Rust"
+license = "MIT"
+repository = "https://github.com/awgn/contatori"
+readme = "README.md"
+keywords = ["atomic", "counter", "concurrent", "performance", "sharded"]
+categories = ["concurrency", "data-structures"]
 
 [dependencies]
 atomic-traits = "0.4.0"
