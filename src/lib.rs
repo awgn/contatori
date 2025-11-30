@@ -70,11 +70,11 @@
 //!
 //! | Type | Description | Use Case |
 //! |------|-------------|----------|
-//! | [`Unsigned`](contatori::unsigned::Unsigned) | Unsigned integer counter | Event counts, request totals |
-//! | [`Signed`](contatori::signed::Signed) | Signed integer counter | Gauges, balance tracking |
-//! | [`Minimum`](contatori::minimum::Minimum) | Tracks minimum observed value | Latency minimums |
-//! | [`Maximum`](contatori::maximum::Maximum) | Tracks maximum observed value | Latency maximums, peak values |
-//! | [`Average`](contatori::average::Average) | Computes running average | Average latency, mean values |
+//! | [`Unsigned`](counters::unsigned::Unsigned) | Unsigned integer counter | Event counts, request totals |
+//! | [`Signed`](counters::signed::Signed) | Signed integer counter | Gauges, balance tracking |
+//! | [`Minimum`](counters::minimum::Minimum) | Tracks minimum observed value | Latency minimums |
+//! | [`Maximum`](counters::maximum::Maximum) | Tracks maximum observed value | Latency maximums, peak values |
+//! | [`Average`](counters::average::Average) | Computes running average | Average latency, mean values |
 //!
 //! ## Quick Start
 //!

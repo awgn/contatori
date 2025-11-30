@@ -1,6 +1,6 @@
 [package]
 name = "contatori"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "High-performance sharded atomic counters for Rust"
 license = "MIT"
@@ -40,3 +40,6 @@ harness = false
 [[example]]
 name = "demo"
 required-features = ["demo"]
+
+[package.metadata.docs.rs]
+all-features = true
