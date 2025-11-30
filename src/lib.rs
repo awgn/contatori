@@ -115,5 +115,68 @@
 //!
 //! For single-threaded scenarios or rarely-updated counters, a simple `AtomicUsize`
 //! may be more appropriate due to lower memory overhead.
+//!
+//! ## Observers
+//!
+//! The library provides optional observer modules for exporting counter values
+//! in various formats. Each observer is gated behind a feature flag:
+//!
+//! | Feature | Module | Description |
+//! |---------|--------|-------------|
+//! | `table` | [`observers::table`] | Pretty-print counters as ASCII tables |
+//! | `json` | [`observers::json`] | Serialize counters to JSON |
+//! | `prometheus` | [`observers::prometheus`] | Export in Prometheus exposition format |
+//! | `full` | All observers | Enables all observer modules |
+//!
+//! ### Example: Table Output
+//!
+//! ```toml
+//! [dependencies]
+//! contatori = { version = "0.1", features = ["table"] }
+//! ```
+//!
+//! ```rust,ignore
+//! use contatori::contatori::unsigned::Unsigned;
+//! use contatori::contatori::Observable;
+//! use contatori::observers::table::TableObserver;
+//!
+//! let requests = Unsigned::new().with_name("http_requests");
+//! requests.add(1000);
+//!
+//! let counters: Vec<&dyn Observable> = vec![&requests];
+//! println!("{}", TableObserver::new().render(counters.into_iter()));
+//! ```
+//!
+//! ### Example: JSON Output
+//!
+//! ```toml
+//! [dependencies]
+//! contatori = { version = "0.1", features = ["json"] }
+//! ```
+//!
+//! ```rust,ignore
+//! use contatori::observers::json::JsonObserver;
+//!
+//! let json = JsonObserver::new()
+//!     .pretty(true)
+//!     .to_json(counters.into_iter())?;
+//! ```
+//!
+//! ### Example: Prometheus Output
+//!
+//! ```toml
+//! [dependencies]
+//! contatori = { version = "0.1", features = ["prometheus"] }
+//! ```
+//!
+//! ```rust,ignore
+//! use contatori::observers::prometheus::PrometheusObserver;
+//!
+//! let output = PrometheusObserver::new()
+//!     .with_prefix("myapp")
+//!     .with_global_label("instance", "server-1")
+//!     .render(counters.into_iter());
+//! ```
 
 pub mod contatori;
+pub mod observers;

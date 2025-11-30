@@ -63,7 +63,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-contatori = "0.1.0"
+contatori = "0.2.0"
 ```
 
 ### Basic Usage
