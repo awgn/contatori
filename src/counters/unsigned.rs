@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 
-use crate::contatori::{
+use crate::counters::{
     CounterValue, GetComponentCounter, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX,
 };
 
@@ -36,20 +36,20 @@ use crate::contatori::{
 /// Basic usage:
 ///
 /// ```rust
-/// use contatori::contatori::unsigned::Unsigned;
-/// use contatori::contatori::Observable;
+/// use contatori::counters::unsigned::Unsigned;
+/// use contatori::counters::Observable;
 ///
 /// let counter = Unsigned::new();
 /// counter.add(1);
 /// counter.add(5);
-/// assert_eq!(counter.value(), contatori::contatori::CounterValue::Unsigned(6));
+/// assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(6));
 /// ```
 ///
 /// Multi-threaded usage:
 ///
 /// ```rust
-/// use contatori::contatori::unsigned::Unsigned;
-/// use contatori::contatori::Observable;
+/// use contatori::counters::unsigned::Unsigned;
+/// use contatori::counters::Observable;
 /// use std::sync::Arc;
 /// use std::thread;
 ///
@@ -69,7 +69,7 @@ use crate::contatori::{
 ///     h.join().unwrap();
 /// }
 ///
-/// assert_eq!(counter.value(), contatori::contatori::CounterValue::Unsigned(4000));
+/// assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(4000));
 /// ```
 pub struct Unsigned {
     name: &'static str,
@@ -94,11 +94,11 @@ impl Unsigned {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::unsigned::Unsigned;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::unsigned::Unsigned;
+    /// use contatori::counters::Observable;
     ///
     /// let counter = Unsigned::new();
-    /// assert_eq!(counter.value(), contatori::contatori::CounterValue::Unsigned(0));
+    /// assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(0));
     /// ```
     pub const fn new() -> Self {
         const ZERO: CachePadded<AtomicUsize> = CachePadded::new(AtomicUsize::new(0));
@@ -116,8 +116,8 @@ impl Unsigned {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::unsigned::Unsigned;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::unsigned::Unsigned;
+    /// use contatori::counters::Observable;
     ///
     /// let counter = Unsigned::new().with_name("http_requests");
     /// assert_eq!(counter.name(), "http_requests");
@@ -134,13 +134,13 @@ impl Unsigned {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::unsigned::Unsigned;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::unsigned::Unsigned;
+    /// use contatori::counters::Observable;
     ///
     /// let counter = Unsigned::new();
     /// counter.add(5);
     /// counter.add(3);
-    /// assert_eq!(counter.value(), contatori::contatori::CounterValue::Unsigned(8));
+    /// assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(8));
     /// ```
     #[inline]
     pub fn add(&self, value: usize) {
@@ -158,13 +158,13 @@ impl Unsigned {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::unsigned::Unsigned;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::unsigned::Unsigned;
+    /// use contatori::counters::Observable;
     ///
     /// let counter = Unsigned::new();
     /// counter.add(10);
     /// counter.sub(3);
-    /// assert_eq!(counter.value(), contatori::contatori::CounterValue::Unsigned(7));
+    /// assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(7));
     /// ```
     #[inline]
     pub fn sub(&self, value: usize) {
@@ -267,7 +267,7 @@ impl Debug for Unsigned {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contatori::Observable;
+    use crate::counters::Observable;
 
     #[test]
     fn test_new() {

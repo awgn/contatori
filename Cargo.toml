@@ -1,6 +1,6 @@
 [package]
 name = "contatori"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "High-performance sharded atomic counters for Rust"
 license = "MIT"
@@ -11,10 +11,10 @@ categories = ["concurrency", "data-structures"]
 
 [features]
 default = []
-table = ["tabled"]
-json = ["serde", "serde_json"]
+table = ["dep:tabled"]
+serde_json = ["dep:serde", "dep:serde_json"]
 prometheus = ["dep:prometheus"]
-full = ["table", "json", "prometheus"]
+full = ["table", "serde_json", "prometheus"]
 demo = ["full", "clap"]
 
 [dependencies]

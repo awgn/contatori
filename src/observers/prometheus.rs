@@ -1,7 +1,7 @@
 //! Prometheus observer for exporting counters using the official `prometheus` crate.
 //!
 //! This module provides [`PrometheusObserver`], which exports a collection of
-//! [`Observable`] counters to a Prometheus [`Registry`](prometheus::Registry) and renders them using
+//! [`Observable`] counters to a Prometheus [`Registry`] and renders them using
 //! the official Prometheus text format.
 //!
 //! # Feature Flag
@@ -19,8 +19,8 @@
 //! `prometheus` crate which provides:
 //!
 //! - Proper metric types (`Counter`, `Gauge`)
-//! - A [`Registry`](prometheus::Registry) for managing metrics
-//! - [`TextEncoder`](prometheus::TextEncoder) for generating the exposition format
+//! - A [`Registry`] for managing metrics
+//! - [`TextEncoder`] for generating the exposition format
 //! - Full compatibility with Prometheus ecosystem
 //!
 //! # Integration with Prometheus
@@ -77,7 +77,7 @@
 //! let observer = PrometheusObserver::with_registry(registry);
 //! ```
 
-use crate::contatori::{CounterValue, Observable};
+use crate::counters::{CounterValue, Observable};
 use prometheus::{Encoder, IntCounter, IntGauge, Registry, TextEncoder};
 use std::collections::HashMap;
 use std::fmt;
@@ -155,7 +155,7 @@ pub struct MetricConfig {
 /// Observer that exports counters to Prometheus format using the official crate.
 ///
 /// This observer creates Prometheus metrics from [`Observable`] counters and
-/// renders them using the official [`TextEncoder`](prometheus::TextEncoder).
+/// renders them using the official [`TextEncoder`].
 ///
 /// # Example
 ///
@@ -511,11 +511,11 @@ impl PrometheusObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contatori::average::Average;
-    use crate::contatori::maximum::Maximum;
-    use crate::contatori::minimum::Minimum;
-    use crate::contatori::signed::Signed;
-    use crate::contatori::unsigned::Unsigned;
+    use crate::counters::average::Average;
+    use crate::counters::maximum::Maximum;
+    use crate::counters::minimum::Minimum;
+    use crate::counters::signed::Signed;
+    use crate::counters::unsigned::Unsigned;
 
     #[test]
     fn test_render_empty() {

@@ -100,7 +100,7 @@ pub fn get_next_slot_id() -> usize {
 /// # Examples
 ///
 /// ```rust
-/// use contatori::contatori::CounterValue;
+/// use contatori::counters::CounterValue;
 ///
 /// let unsigned = CounterValue::Unsigned(42);
 /// let signed = CounterValue::Signed(-10);
@@ -132,7 +132,7 @@ impl CounterValue {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::CounterValue;
+    /// use contatori::counters::CounterValue;
     ///
     /// assert!(CounterValue::Unsigned(0).is_zero());
     /// assert!(CounterValue::Signed(0).is_zero());
@@ -164,8 +164,8 @@ impl CounterValue {
 /// # Examples
 ///
 /// ```rust
-/// use contatori::contatori::Observable;
-/// use contatori::contatori::unsigned::Unsigned;
+/// use contatori::counters::Observable;
+/// use contatori::counters::unsigned::Unsigned;
 ///
 /// let counter = Unsigned::new().with_name("requests");
 /// counter.add(5);

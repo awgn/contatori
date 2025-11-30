@@ -6,12 +6,12 @@
 //! ```
 
 use clap::{Parser, ValueEnum};
-use contatori::contatori::average::Average;
-use contatori::contatori::maximum::Maximum;
-use contatori::contatori::minimum::Minimum;
-use contatori::contatori::signed::Signed;
-use contatori::contatori::unsigned::Unsigned;
-use contatori::contatori::Observable;
+use contatori::counters::average::Average;
+use contatori::counters::maximum::Maximum;
+use contatori::counters::minimum::Minimum;
+use contatori::counters::signed::Signed;
+use contatori::counters::unsigned::Unsigned;
+use contatori::counters::Observable;
 use contatori::observers::json::JsonObserver;
 use contatori::observers::prometheus::{MetricType, PrometheusObserver};
 use contatori::observers::table::{CompactSeparator, TableObserver, TableStyle};

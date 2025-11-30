@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 
-use crate::contatori::{CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX};
+use crate::counters::{CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX};
 
 /// Internal component that stores sum and count for a single shard.
 ///
@@ -53,8 +53,8 @@ impl SumCount {
 /// Basic usage:
 ///
 /// ```rust
-/// use contatori::contatori::average::Average;
-/// use contatori::contatori::Observable;
+/// use contatori::counters::average::Average;
+/// use contatori::counters::Observable;
 ///
 /// let avg_latency = Average::new().with_name("request_latency_avg");
 ///
@@ -70,7 +70,7 @@ impl SumCount {
 /// Batch observations:
 ///
 /// ```rust
-/// use contatori::contatori::average::Average;
+/// use contatori::counters::average::Average;
 ///
 /// let avg = Average::new();
 ///
@@ -94,7 +94,7 @@ impl Average {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::average::Average;
+    /// use contatori::counters::average::Average;
     ///
     /// let avg = Average::new();
     /// assert_eq!(avg.sum(), 0);
@@ -114,8 +114,8 @@ impl Average {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::average::Average;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::average::Average;
+    /// use contatori::counters::Observable;
     ///
     /// let avg = Average::new().with_name("response_time_avg");
     /// assert_eq!(avg.name(), "response_time_avg");
@@ -137,7 +137,7 @@ impl Average {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::average::Average;
+    /// use contatori::counters::average::Average;
     ///
     /// let avg = Average::new();
     /// avg.observe(10);
@@ -162,7 +162,7 @@ impl Average {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::average::Average;
+    /// use contatori::counters::average::Average;
     ///
     /// let avg = Average::new();
     ///
@@ -185,7 +185,7 @@ impl Average {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::average::Average;
+    /// use contatori::counters::average::Average;
     ///
     /// let avg = Average::new();
     /// avg.add_sum(100);
@@ -257,7 +257,7 @@ impl Average {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::average::Average;
+    /// use contatori::counters::average::Average;
     ///
     /// let avg = Average::new();
     /// assert_eq!(avg.average(), None);
@@ -284,7 +284,7 @@ impl Average {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::average::Average;
+    /// use contatori::counters::average::Average;
     ///
     /// let avg = Average::new();
     /// avg.observe(1);
@@ -324,7 +324,7 @@ impl Average {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::average::Average;
+    /// use contatori::counters::average::Average;
     ///
     /// let avg = Average::new();
     /// avg.observe(100);
@@ -351,7 +351,7 @@ impl Average {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::average::Average;
+    /// use contatori::counters::average::Average;
     ///
     /// let avg = Average::new();
     /// avg.observe(100);
@@ -425,7 +425,7 @@ impl Debug for Average {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contatori::Observable;
+    use crate::counters::Observable;
 
     #[test]
     fn test_new() {

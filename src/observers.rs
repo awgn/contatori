@@ -18,8 +18,8 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use contatori::contatori::Observable;
-//! use contatori::contatori::unsigned::Unsigned;
+//! use contatori::counters::Observable;
+//! use contatori::counters::unsigned::Unsigned;
 //! use contatori::observers::table::TableObserver;
 //!
 //! let counters: Vec<Box<dyn Observable>> = vec![
@@ -34,7 +34,7 @@
 #[cfg(feature = "table")]
 pub mod table;
 
-#[cfg(feature = "json")]
+#[cfg(feature = "serde_json")]
 pub mod json;
 
 #[cfg(feature = "prometheus")]

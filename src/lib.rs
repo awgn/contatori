@@ -79,8 +79,8 @@
 //! ## Quick Start
 //!
 //! ```rust
-//! use contatori::contatori::unsigned::Unsigned;
-//! use contatori::contatori::Observable;
+//! use contatori::counters::unsigned::Unsigned;
+//! use contatori::counters::Observable;
 //!
 //! // Create a counter (can be shared across threads via Arc)
 //! let counter = Unsigned::new().with_name("requests");
@@ -136,8 +136,8 @@
 //! ```
 //!
 //! ```rust,ignore
-//! use contatori::contatori::unsigned::Unsigned;
-//! use contatori::contatori::Observable;
+//! use contatori::counters::unsigned::Unsigned;
+//! use contatori::counters::Observable;
 //! use contatori::observers::table::TableObserver;
 //!
 //! let requests = Unsigned::new().with_name("http_requests");
@@ -178,5 +178,5 @@
 //!     .render(counters.into_iter());
 //! ```
 
-pub mod contatori;
+pub mod counters;
 pub mod observers;

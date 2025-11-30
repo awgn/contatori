@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 
-use crate::contatori::{
+use crate::counters::{
     CounterValue, GetComponentCounter, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX,
 };
 
@@ -33,8 +33,8 @@ use crate::contatori::{
 /// Basic usage:
 ///
 /// ```rust
-/// use contatori::contatori::signed::Signed;
-/// use contatori::contatori::Observable;
+/// use contatori::counters::signed::Signed;
+/// use contatori::counters::Observable;
 ///
 /// let gauge = Signed::new().with_name("active_connections");
 ///
@@ -45,20 +45,20 @@ use crate::contatori::{
 /// // Connection closes
 /// gauge.sub(1);
 ///
-/// assert_eq!(gauge.value(), contatori::contatori::CounterValue::Signed(1));
+/// assert_eq!(gauge.value(), contatori::counters::CounterValue::Signed(1));
 /// ```
 ///
 /// Tracking balance:
 ///
 /// ```rust
-/// use contatori::contatori::signed::Signed;
-/// use contatori::contatori::Observable;
+/// use contatori::counters::signed::Signed;
+/// use contatori::counters::Observable;
 ///
 /// let balance = Signed::new();
 /// balance.add(100);  // Deposit
 /// balance.sub(150);  // Withdrawal (overdraft!)
 ///
-/// assert_eq!(balance.value(), contatori::contatori::CounterValue::Signed(-50));
+/// assert_eq!(balance.value(), contatori::counters::CounterValue::Signed(-50));
 /// ```
 pub struct Signed {
     name: &'static str,
@@ -83,11 +83,11 @@ impl Signed {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::signed::Signed;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::signed::Signed;
+    /// use contatori::counters::Observable;
     ///
     /// let counter = Signed::new();
-    /// assert_eq!(counter.value(), contatori::contatori::CounterValue::Signed(0));
+    /// assert_eq!(counter.value(), contatori::counters::CounterValue::Signed(0));
     /// ```
     pub const fn new() -> Self {
         const ZERO: CachePadded<AtomicIsize> = CachePadded::new(AtomicIsize::new(0));
@@ -102,8 +102,8 @@ impl Signed {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::signed::Signed;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::signed::Signed;
+    /// use contatori::counters::Observable;
     ///
     /// let counter = Signed::new().with_name("temperature_delta");
     /// assert_eq!(counter.name(), "temperature_delta");
@@ -117,13 +117,13 @@ impl Signed {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::signed::Signed;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::signed::Signed;
+    /// use contatori::counters::Observable;
     ///
     /// let counter = Signed::new();
     /// counter.add(10);
     /// counter.add(-15);
-    /// assert_eq!(counter.value(), contatori::contatori::CounterValue::Signed(-5));
+    /// assert_eq!(counter.value(), contatori::counters::CounterValue::Signed(-5));
     /// ```
     #[inline]
     pub fn add(&self, value: isize) {
@@ -136,12 +136,12 @@ impl Signed {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::signed::Signed;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::signed::Signed;
+    /// use contatori::counters::Observable;
     ///
     /// let counter = Signed::new();
     /// counter.sub(5);
-    /// assert_eq!(counter.value(), contatori::contatori::CounterValue::Signed(-5));
+    /// assert_eq!(counter.value(), contatori::counters::CounterValue::Signed(-5));
     /// ```
     #[inline]
     pub fn sub(&self, value: isize) {
@@ -227,7 +227,7 @@ impl Debug for Signed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contatori::Observable;
+    use crate::counters::Observable;
 
     #[test]
     fn test_new() {

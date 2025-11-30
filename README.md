@@ -63,14 +63,14 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-contatori = "0.2.0"
+contatori = "0.3.0"
 ```
 
 ### Basic Usage
 
 ```rust
-use contatori::contatori::unsigned::Unsigned;
-use contatori::contatori::Observable;
+use contatori::counters::unsigned::Unsigned;
+use contatori::counters::Observable;
 
 // Create a counter (can be shared across threads via Arc)
 let counter = Unsigned::new().with_name("requests");
@@ -89,8 +89,8 @@ let total = counter.value_and_reset();
 ### Multi-threaded Usage
 
 ```rust
-use contatori::contatori::unsigned::Unsigned;
-use contatori::contatori::Observable;
+use contatori::counters::unsigned::Unsigned;
+use contatori::counters::Observable;
 use std::sync::Arc;
 use std::thread;
 
@@ -110,16 +110,16 @@ for h in handles {
     h.join().unwrap();
 }
 
-assert_eq!(counter.value(), contatori::contatori::CounterValue::Unsigned(8_000_000));
+assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(8_000_000));
 ```
 
 ### Tracking Statistics
 
 ```rust
-use contatori::contatori::minimum::Minimum;
-use contatori::contatori::maximum::Maximum;
-use contatori::contatori::average::Average;
-use contatori::contatori::Observable;
+use contatori::counters::minimum::Minimum;
+use contatori::counters::maximum::Maximum;
+use contatori::counters::average::Average;
+use contatori::counters::Observable;
 
 let min_latency = Minimum::new().with_name("latency_min");
 let max_latency = Maximum::new().with_name("latency_max");

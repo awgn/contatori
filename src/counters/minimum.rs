@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 
-use crate::contatori::{CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX};
+use crate::counters::{CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX};
 
 /// A high-performance minimum value tracker using sharded atomic storage.
 ///
@@ -37,8 +37,8 @@ use crate::contatori::{CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_IND
 /// # Examples
 ///
 /// ```rust
-/// use contatori::contatori::minimum::Minimum;
-/// use contatori::contatori::Observable;
+/// use contatori::counters::minimum::Minimum;
+/// use contatori::counters::Observable;
 ///
 /// let min_latency = Minimum::new().with_name("request_latency_min");
 ///
@@ -48,7 +48,7 @@ use crate::contatori::{CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_IND
 /// min_latency.observe(200);
 ///
 /// // The minimum is 85
-/// assert_eq!(min_latency.value(), contatori::contatori::CounterValue::Unsigned(85));
+/// assert_eq!(min_latency.value(), contatori::counters::CounterValue::Unsigned(85));
 /// ```
 pub struct Minimum {
     name: &'static str,
@@ -64,12 +64,12 @@ impl Minimum {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::minimum::Minimum;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::minimum::Minimum;
+    /// use contatori::counters::Observable;
     ///
     /// let tracker = Minimum::new();
     /// // Before any observations, value is MAX
-    /// assert_eq!(tracker.value(), contatori::contatori::CounterValue::Unsigned(u64::MAX));
+    /// assert_eq!(tracker.value(), contatori::counters::CounterValue::Unsigned(u64::MAX));
     /// ```
     pub const fn new() -> Self {
         const MAX: CachePadded<AtomicUsize> = CachePadded::new(AtomicUsize::new(usize::MAX));
@@ -84,8 +84,8 @@ impl Minimum {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::minimum::Minimum;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::minimum::Minimum;
+    /// use contatori::counters::Observable;
     ///
     /// let tracker = Minimum::new().with_name("min_response_time");
     /// assert_eq!(tracker.name(), "min_response_time");
@@ -108,15 +108,15 @@ impl Minimum {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::minimum::Minimum;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::minimum::Minimum;
+    /// use contatori::counters::Observable;
     ///
     /// let tracker = Minimum::new();
     /// tracker.observe(100);
     /// tracker.observe(50);   // New minimum
     /// tracker.observe(75);   // Ignored (not smaller)
     ///
-    /// assert_eq!(tracker.value(), contatori::contatori::CounterValue::Unsigned(50));
+    /// assert_eq!(tracker.value(), contatori::counters::CounterValue::Unsigned(50));
     /// ```
     #[inline]
     pub fn observe(&self, value: usize) {
@@ -227,7 +227,7 @@ impl Debug for Minimum {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contatori::Observable;
+    use crate::counters::Observable;
 
     #[test]
     fn test_new() {

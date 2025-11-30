@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 
-use crate::contatori::{CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX};
+use crate::counters::{CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX};
 
 /// A high-performance maximum value tracker using sharded atomic storage.
 ///
@@ -37,8 +37,8 @@ use crate::contatori::{CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_IND
 /// # Examples
 ///
 /// ```rust
-/// use contatori::contatori::maximum::Maximum;
-/// use contatori::contatori::Observable;
+/// use contatori::counters::maximum::Maximum;
+/// use contatori::counters::Observable;
 ///
 /// let max_latency = Maximum::new().with_name("request_latency_max");
 ///
@@ -48,7 +48,7 @@ use crate::contatori::{CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_IND
 /// max_latency.observe(200);
 ///
 /// // The maximum is 200
-/// assert_eq!(max_latency.value(), contatori::contatori::CounterValue::Unsigned(200));
+/// assert_eq!(max_latency.value(), contatori::counters::CounterValue::Unsigned(200));
 /// ```
 pub struct Maximum {
     name: &'static str,
@@ -64,12 +64,12 @@ impl Maximum {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::maximum::Maximum;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::maximum::Maximum;
+    /// use contatori::counters::Observable;
     ///
     /// let tracker = Maximum::new();
     /// // Before any observations, value is 0
-    /// assert_eq!(tracker.value(), contatori::contatori::CounterValue::Unsigned(0));
+    /// assert_eq!(tracker.value(), contatori::counters::CounterValue::Unsigned(0));
     /// ```
     pub const fn new() -> Self {
         const MIN: CachePadded<AtomicUsize> = CachePadded::new(AtomicUsize::new(usize::MIN));
@@ -84,8 +84,8 @@ impl Maximum {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::maximum::Maximum;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::maximum::Maximum;
+    /// use contatori::counters::Observable;
     ///
     /// let tracker = Maximum::new().with_name("max_response_time");
     /// assert_eq!(tracker.name(), "max_response_time");
@@ -102,15 +102,15 @@ impl Maximum {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::contatori::maximum::Maximum;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::maximum::Maximum;
+    /// use contatori::counters::Observable;
     ///
     /// let tracker = Maximum::new();
     /// tracker.observe(100);
     /// tracker.observe(150);  // New maximum
     /// tracker.observe(75);   // Ignored (not greater)
     ///
-    /// assert_eq!(tracker.value(), contatori::contatori::CounterValue::Unsigned(150));
+    /// assert_eq!(tracker.value(), contatori::counters::CounterValue::Unsigned(150));
     /// ```
     #[inline]
     pub fn observe(&self, value: usize) {

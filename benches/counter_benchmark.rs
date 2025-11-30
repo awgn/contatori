@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-use contatori::contatori::unsigned::Unsigned;
-use contatori::contatori::Observable;
+use contatori::counters::unsigned::Unsigned;
+use contatori::counters::Observable;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
 const NUM_THREADS: usize = 8;

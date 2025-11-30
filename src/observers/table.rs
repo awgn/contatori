@@ -56,7 +56,7 @@
 //! // ╰────────────────┴────────────┴──────────────╯
 //! ```
 
-use crate::contatori::Observable;
+use crate::counters::Observable;
 use tabled::{
     builder::Builder,
     settings::Style,
@@ -518,11 +518,11 @@ impl TableObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contatori::unsigned::Unsigned;
-    use crate::contatori::signed::Signed;
-    use crate::contatori::minimum::Minimum;
-    use crate::contatori::maximum::Maximum;
-    use crate::contatori::average::Average;
+    use crate::counters::unsigned::Unsigned;
+    use crate::counters::signed::Signed;
+    use crate::counters::minimum::Minimum;
+    use crate::counters::maximum::Maximum;
+    use crate::counters::average::Average;
 
     #[test]
     fn test_render_empty() {
@@ -743,7 +743,7 @@ mod tests {
         let output = observer.render_and_reset(counters.into_iter());
 
         assert!(output.contains("50"));
-        assert_eq!(counter.value(), crate::contatori::CounterValue::Unsigned(0));
+        assert_eq!(counter.value(), crate::counters::CounterValue::Unsigned(0));
     }
 
     #[test]
@@ -756,7 +756,7 @@ mod tests {
         let output = observer.render_and_reset(counters.into_iter());
 
         assert!(output.contains("resettable: 75"));
-        assert_eq!(counter.value(), crate::contatori::CounterValue::Unsigned(0));
+        assert_eq!(counter.value(), crate::counters::CounterValue::Unsigned(0));
     }
 
     #[test]

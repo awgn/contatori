@@ -34,7 +34,7 @@
 //! // [{"name":"http_requests","value":1000},{"name":"http_errors","value":5}]
 //! ```
 
-use crate::contatori::{CounterValue, Observable};
+use crate::counters::{CounterValue, Observable};
 use serde::{Deserialize, Serialize};
 
 /// A snapshot of a single counter's state.
@@ -359,11 +359,11 @@ fn current_timestamp_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contatori::average::Average;
-    use crate::contatori::maximum::Maximum;
-    use crate::contatori::minimum::Minimum;
-    use crate::contatori::signed::Signed;
-    use crate::contatori::unsigned::Unsigned;
+    use crate::counters::average::Average;
+    use crate::counters::maximum::Maximum;
+    use crate::counters::minimum::Minimum;
+    use crate::counters::signed::Signed;
+    use crate::counters::unsigned::Unsigned;
 
     #[test]
     fn test_to_json_empty() {
@@ -470,7 +470,7 @@ mod tests {
         let json = observer.to_json_and_reset(counters.into_iter()).unwrap();
 
         assert!(json.contains("75"));
-        assert_eq!(counter.value(), crate::contatori::CounterValue::Unsigned(0));
+        assert_eq!(counter.value(), crate::counters::CounterValue::Unsigned(0));
     }
 
     #[test]
