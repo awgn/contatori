@@ -267,6 +267,28 @@ pub trait Observable: Debug {
     /// either the returned value or the next collection period. For
     /// metrics and statistics, this is typically acceptable.
     fn value_and_reset(&self) -> CounterValue;
+
+    /// Returns the labels associated with this counter.
+    ///
+    /// Labels are key-value pairs that provide additional dimensions
+    /// for the metric, useful for systems like Prometheus.
+    ///
+    /// The default implementation returns an empty slice. Counters
+    /// wrapped with [`Labeled`](crate::wrappers::Labeled) will return
+    /// their configured labels.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use contatori::counters::Observable;
+    /// use contatori::counters::unsigned::Unsigned;
+    ///
+    /// let counter = Unsigned::new();
+    /// assert!(counter.labels().is_empty());
+    /// ```
+    fn labels(&self) -> &[(String, String)] {
+        &[]
+    }
 }
 
 impl Display for dyn Observable + '_ {

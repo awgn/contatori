@@ -358,10 +358,14 @@ impl PrometheusObserver {
                 .and_then(|c| c.help.clone())
                 .unwrap_or_else(|| format!("{} metric", raw_name));
 
-            // Merge const_labels with metric-specific labels
+            // Merge const_labels with metric-specific labels and counter labels
             let mut labels = self.const_labels.clone();
             if let Some(cfg) = config {
                 labels.extend(cfg.labels.clone());
+            }
+            // Add labels from the counter itself (e.g., from Labeled wrapper)
+            for (k, v) in counter.labels() {
+                labels.insert(k.clone(), v.clone());
             }
 
             let value = counter.value();
@@ -408,6 +412,10 @@ impl PrometheusObserver {
             let mut labels = self.const_labels.clone();
             if let Some(cfg) = config {
                 labels.extend(cfg.labels.clone());
+            }
+            // Add labels from the counter itself (e.g., from Labeled wrapper)
+            for (k, v) in counter.labels() {
+                labels.insert(k.clone(), v.clone());
             }
 
             // Get value and reset
@@ -808,5 +816,45 @@ mod tests {
 
         // Counter can't be negative, so it should be 0
         assert!(output.contains("negative_counter 0"));
+    }
+
+    #[test]
+    fn test_labeled_counter() {
+        use crate::adapters::Labeled;
+
+        let counter = Labeled::new(Unsigned::new().with_name("http_requests"))
+            .with_label("method", "GET")
+            .with_label("path", "/api/users");
+        counter.add(100);
+
+        let observer = PrometheusObserver::new();
+        let counters: Vec<&dyn Observable> = vec![&counter];
+        let output = observer.render(counters.into_iter()).unwrap();
+
+        // Should contain the metric with labels
+        assert!(output.contains("http_requests"));
+        assert!(output.contains("method=\"GET\""));
+        assert!(output.contains("path=\"/api/users\""));
+        assert!(output.contains("100"));
+    }
+
+    #[test]
+    fn test_labeled_counter_with_const_labels() {
+        use crate::adapters::Labeled;
+
+        let counter = Labeled::new(Unsigned::new().with_name("requests"))
+            .with_label("method", "POST");
+        counter.add(50);
+
+        let observer = PrometheusObserver::new()
+            .with_const_label("instance", "server-1");
+
+        let counters: Vec<&dyn Observable> = vec![&counter];
+        let output = observer.render(counters.into_iter()).unwrap();
+
+        // Should contain both const labels and counter labels
+        assert!(output.contains("instance=\"server-1\""));
+        assert!(output.contains("method=\"POST\""));
+        assert!(output.contains("50"));
     }
 }

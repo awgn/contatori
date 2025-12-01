@@ -352,6 +352,77 @@ println!("{}", output);
 | `MetricType::Counter` | Cumulative metric that only goes up | Total requests, errors, bytes sent |
 | `MetricType::Gauge` | Value that can go up and down | Active connections, queue size, temperature |
 
+## Adapters 
+
+The library provides adapters types that add additional behavior to counters while maintaining compatibility with the `Observable` trait.
+
+| Wrapper | Description |
+|---------|-------------|
+| `NonResettable` | Prevents reset on `value_and_reset()` - for monotonic counters |
+| `Labeled` | Adds key-value labels/tags to a counter |
+
+### NonResettable
+
+Wraps a counter to prevent it from being reset when `value_and_reset()` is called. Useful for monotonic counters like Prometheus counters that should never decrease.
+
+```rust
+use contatori::counters::unsigned::Unsigned;
+use contatori::counters::Observable;
+use contatori::adapters::NonResettable;
+
+let total = NonResettable::new(Unsigned::new().with_name("total_requests"));
+total.add(100);
+
+// value_and_reset() returns value but does NOT reset
+assert_eq!(total.value_and_reset().as_u64(), 100);
+assert_eq!(total.value().as_u64(), 100); // Still 100!
+
+total.add(50);
+assert_eq!(total.value().as_u64(), 150); // Keeps accumulating
+```
+
+### Labeled
+
+Wraps a counter to add key-value labels (tags/dimensions). Particularly useful for Prometheus-style metrics.
+
+```rust
+use contatori::counters::unsigned::Unsigned;
+use contatori::counters::Observable;
+use contatori::adapters::Labeled;
+
+let requests = Labeled::new(Unsigned::new().with_name("http_requests"))
+    .with_label("method", "GET")
+    .with_label("path", "/api/users")
+    .with_label("status", "200");
+
+requests.add(100);
+
+// Access labels
+for (key, value) in requests.labels() {
+    println!("{}: {}", key, value);
+}
+
+// Check specific label
+assert_eq!(requests.get_label("method"), Some("GET"));
+```
+
+### Combining Adapters 
+
+Adapters can be combined for more complex behavior:
+
+```rust
+use contatori::counters::unsigned::Unsigned;
+use contatori::adapters::{NonResettable, Labeled};
+
+// A labeled, non-resettable counter
+let counter = NonResettable::new(
+    Labeled::new(Unsigned::new().with_name("total_bytes"))
+        .with_label("direction", "ingress")
+);
+
+counter.add(1024);
+```
+
 ## When to Use Sharded Counters
 
 Sharded counters are ideal when:
