@@ -34,7 +34,7 @@
 #[cfg(feature = "table")]
 pub mod table;
 
-#[cfg(feature = "serde_json")]
+#[cfg(feature = "json")]
 pub mod json;
 
 #[cfg(feature = "prometheus")]

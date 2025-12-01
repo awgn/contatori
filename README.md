@@ -145,9 +145,216 @@ All counter types are `Send + Sync` and can be safely shared across threads usin
 
 Each counter uses approximately **4KB of memory** (64 slots × 64 bytes per cache line). This is a trade-off: more memory for dramatically better performance under contention.
 
-## When to Use
+## Serialization & Observers
 
-Use these counters when:
+The library provides optional modules for serializing and exporting counter values in various formats. Each module is gated behind a feature flag:
+
+| Feature | Module | Description |
+|---------|--------|-------------|
+| `serde` | `snapshot` | Serializable snapshot types (use with any serde format) |
+| `table` | `observers::table` | Renders counters as ASCII tables |
+| `json` | `observers::json` | Serializes counters to JSON (includes `serde`) |
+| `prometheus` | `observers::prometheus` | Exports in Prometheus exposition format |
+| `full` | All modules | Enables all observer modules |
+
+### Snapshot Module
+
+The `snapshot` module provides serializable types that work with any serde-compatible format (JSON, YAML, TOML, bincode, etc.).
+
+```toml
+[dependencies]
+contatori = { version = "0.3", features = ["serde"] }
+```
+
+```rust
+use contatori::counters::unsigned::Unsigned;
+use contatori::counters::Observable;
+use contatori::snapshot::{CounterSnapshot, MetricsSnapshot};
+
+let requests = Unsigned::new().with_name("requests");
+let errors = Unsigned::new().with_name("errors");
+
+requests.add(1000);
+errors.add(5);
+
+let counters: Vec<&dyn Observable> = vec![&requests, &errors];
+
+// Collect snapshots
+let snapshot = MetricsSnapshot::collect(counters.into_iter());
+
+// Serialize with any serde-compatible format
+let json = serde_json::to_string(&snapshot).unwrap();
+let yaml = serde_yaml::to_string(&snapshot).unwrap();
+let bytes = bincode::serialize(&snapshot).unwrap();
+```
+
+### TableObserver
+
+Renders counters as formatted ASCII tables using the `tabled` crate.
+
+```toml
+[dependencies]
+contatori = { version = "0.3", features = ["table"] }
+```
+
+```rust
+use contatori::counters::unsigned::Unsigned;
+use contatori::counters::Observable;
+use contatori::observers::table::{TableObserver, TableStyle};
+
+let requests = Unsigned::new().with_name("requests");
+let errors = Unsigned::new().with_name("errors");
+
+requests.add(1000);
+errors.add(5);
+
+let counters: Vec<&dyn Observable> = vec![&requests, &errors];
+
+// Standard format (vertical list)
+let observer = TableObserver::new().with_style(TableStyle::Rounded);
+println!("{}", observer.render(counters.into_iter()));
+// ╭──────────┬───────╮
+// │ Name     │ Value │
+// ├──────────┼───────┤
+// │ requests │ 1000  │
+// │ errors   │ 5     │
+// ╰──────────┴───────╯
+
+// Compact format (multiple columns)
+let observer = TableObserver::new()
+    .compact(true)
+    .columns(3);
+println!("{}", observer.render(counters.into_iter()));
+// ╭────────────────┬───────────┬──────────────╮
+// │ requests: 1000 │ errors: 5 │ latency: 120 │
+// ╰────────────────┴───────────┴──────────────╯
+```
+
+**Available styles:** `Ascii`, `Rounded`, `Sharp`, `Modern`, `Extended`, `Markdown`, `ReStructuredText`, `Dots`, `Blank`, `Double`
+
+**Compact separators:** `Colon` (`:`), `Equals` (`=`), `Arrow` (`→`), `Pipe` (`|`), `Space`
+
+#### TableObserver Configuration
+
+| Method | Description |
+|--------|-------------|
+| `with_style(TableStyle)` | Sets the table border style |
+| `with_header(bool)` | Shows or hides the header row |
+| `with_title(String)` | Adds a title above the table |
+| `compact(bool)` | Enables compact horizontal layout |
+| `columns(usize)` | Number of columns in compact mode |
+| `separator(CompactSeparator)` | Separator between name and value in compact mode |
+| `render(iter)` | Renders the counters to a string |
+| `render_and_reset(iter)` | Renders and atomically resets all counters |
+
+### JsonObserver
+
+Serializes counters to JSON format using serde.
+
+```toml
+[dependencies]
+contatori = { version = "0.3", features = ["json"] }
+```
+
+```rust
+use contatori::counters::unsigned::Unsigned;
+use contatori::counters::Observable;
+use contatori::observers::json::JsonObserver;
+
+let requests = Unsigned::new().with_name("http_requests");
+let errors = Unsigned::new().with_name("http_errors");
+
+requests.add(1000);
+errors.add(5);
+
+let counters: Vec<&dyn Observable> = vec![&requests, &errors];
+
+// Simple array output
+let json = JsonObserver::new()
+    .to_json(counters.into_iter())
+    .unwrap();
+
+// Pretty-printed output with timestamp wrapper
+let json = JsonObserver::new()
+    .pretty(true)
+    .wrap_in_snapshot(true)
+    .include_timestamp(true)
+    .to_json(counters.into_iter())
+    .unwrap();
+```
+
+#### JsonObserver Configuration
+
+| Method | Description |
+|--------|-------------|
+| `pretty(bool)` | Enables pretty-printed JSON output |
+| `wrap_in_snapshot(bool)` | Wraps output in a `MetricsSnapshot` object |
+| `include_timestamp(bool)` | Includes timestamp in the snapshot (requires `wrap_in_snapshot`) |
+| `to_json(iter)` | Serializes counters to a JSON string |
+| `to_json_and_reset(iter)` | Serializes and atomically resets all counters |
+| `collect(iter)` | Returns a `Vec<CounterSnapshot>` for custom processing |
+
+### PrometheusObserver
+
+Exports counters in Prometheus exposition format using the official `prometheus` crate.
+
+```toml
+[dependencies]
+contatori = { version = "0.3", features = ["prometheus"] }
+```
+
+```rust
+use contatori::counters::unsigned::Unsigned;
+use contatori::counters::Observable;
+use contatori::observers::prometheus::{PrometheusObserver, MetricType};
+
+let requests = Unsigned::new().with_name("http_requests_total");
+let errors = Unsigned::new().with_name("http_errors_total");
+let connections = Unsigned::new().with_name("active_connections");
+
+requests.add(1000);
+errors.add(5);
+connections.add(42);
+
+let counters: Vec<&dyn Observable> = vec![&requests, &errors, &connections];
+
+let observer = PrometheusObserver::new()
+    .with_namespace("myapp")
+    .with_const_label("instance", "localhost:8080")
+    .with_type("http_requests_total", MetricType::Counter)
+    .with_type("http_errors_total", MetricType::Counter)
+    .with_type("active_connections", MetricType::Gauge)
+    .with_help("http_requests_total", "Total number of HTTP requests")
+    .with_help("http_errors_total", "Total number of HTTP errors")
+    .with_help("active_connections", "Current number of active connections");
+
+let output = observer.render(counters.into_iter()).unwrap();
+println!("{}", output);
+```
+
+#### PrometheusObserver Configuration
+
+| Method | Description |
+|--------|-------------|
+| `with_namespace(str)` | Sets a prefix for all metric names (e.g., `myapp_`) |
+| `with_subsystem(str)` | Sets a subsystem between namespace and metric name |
+| `with_const_label(name, value)` | Adds a constant label to all metrics |
+| `with_type(name, MetricType)` | Sets the metric type (`Counter` or `Gauge`) |
+| `with_help(name, text)` | Sets the help text for a specific metric |
+| `with_default_type(MetricType)` | Sets the default type for unconfigured metrics |
+| `render(iter)` | Renders counters to Prometheus exposition format |
+| `render_and_reset(iter)` | Renders and atomically resets all counters |
+
+#### Metric Types
+
+| Type | Description | Use Case |
+|------|-------------|----------|
+| `MetricType::Counter` | Cumulative metric that only goes up | Total requests, errors, bytes sent |
+| `MetricType::Gauge` | Value that can go up and down | Active connections, queue size, temperature |
+
+## When to Use Sharded Counters
+
+Sharded counters are ideal when:
 - Multiple threads frequently update the same counter
 - Write performance is more important than read performance
 - You're tracking metrics, statistics, or telemetry data

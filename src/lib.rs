@@ -180,3 +180,6 @@
 
 pub mod counters;
 pub mod observers;
+
+#[cfg(feature = "serde")]
+pub mod snapshot;

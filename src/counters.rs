@@ -47,6 +47,8 @@ pub mod signed;
 pub mod unsigned;
 
 use atomic_traits::Atomic;
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
 use std::{
     fmt::Debug,
     fmt::Display,
@@ -110,6 +112,8 @@ pub fn get_next_slot_id() -> usize {
 /// assert!(CounterValue::Unsigned(0).is_zero());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(untagged))]
 pub enum CounterValue {
     /// An unsigned 64-bit counter value.
     Unsigned(u64),
@@ -143,6 +147,59 @@ impl CounterValue {
         match self {
             CounterValue::Unsigned(v) => *v == 0,
             CounterValue::Signed(v) => *v == 0,
+        }
+    }
+
+    /// Returns the value as an `i64`, converting unsigned to signed if necessary.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use contatori::counters::CounterValue;
+    ///
+    /// assert_eq!(CounterValue::Unsigned(100).as_i64(), 100);
+    /// assert_eq!(CounterValue::Signed(-50).as_i64(), -50);
+    /// ```
+    pub fn as_i64(&self) -> i64 {
+        match self {
+            CounterValue::Unsigned(v) => *v as i64,
+            CounterValue::Signed(v) => *v,
+        }
+    }
+
+    /// Returns the value as a `u64`, converting signed to unsigned if necessary.
+    ///
+    /// Note: Negative values will wrap around.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use contatori::counters::CounterValue;
+    ///
+    /// assert_eq!(CounterValue::Unsigned(100).as_u64(), 100);
+    /// assert_eq!(CounterValue::Signed(50).as_u64(), 50);
+    /// ```
+    pub fn as_u64(&self) -> u64 {
+        match self {
+            CounterValue::Unsigned(v) => *v,
+            CounterValue::Signed(v) => *v as u64,
+        }
+    }
+
+    /// Returns the value as an `f64`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use contatori::counters::CounterValue;
+    ///
+    /// assert_eq!(CounterValue::Unsigned(100).as_f64(), 100.0);
+    /// assert_eq!(CounterValue::Signed(-50).as_f64(), -50.0);
+    /// ```
+    pub fn as_f64(&self) -> f64 {
+        match self {
+            CounterValue::Unsigned(v) => *v as f64,
+            CounterValue::Signed(v) => *v as f64,
         }
     }
 }

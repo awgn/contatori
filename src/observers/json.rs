@@ -9,7 +9,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.3", features = ["serde_json"] }
+//! contatori = { version = "0.3", features = ["json"] }
 //! ```
 //!
 //! # Examples
@@ -34,117 +34,10 @@
 //! // [{"name":"http_requests","value":1000},{"name":"http_errors","value":5}]
 //! ```
 
-use crate::counters::{CounterValue, Observable};
-use serde::{Deserialize, Serialize};
+use crate::counters::Observable;
 
-/// A snapshot of a single counter's state.
-///
-/// This struct is serializable to JSON and can be used for:
-/// - Storing counter values to files
-/// - Sending metrics over HTTP APIs
-/// - Inter-process communication
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use contatori::observers::json::CounterSnapshot;
-///
-/// let snapshot = CounterSnapshot {
-///     name: "requests".to_string(),
-///     value: CounterSnapshotValue::Unsigned(42),
-/// };
-///
-/// let json = serde_json::to_string(&snapshot).unwrap();
-/// assert_eq!(json, r#"{"name":"requests","value":{"Unsigned":42}}"#);
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CounterSnapshot {
-    /// The name of the counter.
-    pub name: String,
-    /// The value of the counter.
-    pub value: CounterSnapshotValue,
-}
-
-/// The value of a counter snapshot, supporting both signed and unsigned types.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
-pub enum CounterSnapshotValue {
-    /// An unsigned 64-bit value.
-    Unsigned(u64),
-    /// A signed 64-bit value.
-    Signed(i64),
-}
-
-impl From<CounterValue> for CounterSnapshotValue {
-    fn from(value: CounterValue) -> Self {
-        match value {
-            CounterValue::Unsigned(v) => CounterSnapshotValue::Unsigned(v),
-            CounterValue::Signed(v) => CounterSnapshotValue::Signed(v),
-        }
-    }
-}
-
-impl CounterSnapshotValue {
-    /// Returns the value as an i64, converting unsigned to signed if necessary.
-    pub fn as_i64(&self) -> i64 {
-        match self {
-            CounterSnapshotValue::Unsigned(v) => *v as i64,
-            CounterSnapshotValue::Signed(v) => *v,
-        }
-    }
-
-    /// Returns the value as a u64, converting signed to unsigned if necessary.
-    ///
-    /// Note: Negative values will wrap around.
-    pub fn as_u64(&self) -> u64 {
-        match self {
-            CounterSnapshotValue::Unsigned(v) => *v,
-            CounterSnapshotValue::Signed(v) => *v as u64,
-        }
-    }
-
-    /// Returns the value as an f64.
-    pub fn as_f64(&self) -> f64 {
-        match self {
-            CounterSnapshotValue::Unsigned(v) => *v as f64,
-            CounterSnapshotValue::Signed(v) => *v as f64,
-        }
-    }
-}
-
-/// A collection of counter snapshots, typically representing a point-in-time
-/// capture of all metrics.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MetricsSnapshot {
-    /// Optional timestamp in milliseconds since Unix epoch.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timestamp_ms: Option<u64>,
-    /// The counter snapshots.
-    pub counters: Vec<CounterSnapshot>,
-}
-
-impl MetricsSnapshot {
-    /// Creates a new metrics snapshot with the given counters.
-    pub fn new(counters: Vec<CounterSnapshot>) -> Self {
-        Self {
-            timestamp_ms: None,
-            counters,
-        }
-    }
-
-    /// Creates a new metrics snapshot with counters and a timestamp.
-    pub fn with_timestamp(counters: Vec<CounterSnapshot>, timestamp_ms: u64) -> Self {
-        Self {
-            timestamp_ms: Some(timestamp_ms),
-            counters,
-        }
-    }
-
-    /// Finds a counter by name.
-    pub fn get(&self, name: &str) -> Option<&CounterSnapshot> {
-        self.counters.iter().find(|c| c.name == name)
-    }
-}
+// Re-export snapshot types for backwards compatibility
+pub use crate::snapshot::{CounterSnapshot, MetricsSnapshot};
 
 /// Configuration for the JSON observer.
 #[derive(Debug, Clone, Default)]
@@ -239,16 +132,7 @@ impl JsonObserver {
         &self,
         counters: impl Iterator<Item = &'a dyn Observable>,
     ) -> Vec<CounterSnapshot> {
-        counters
-            .map(|c| CounterSnapshot {
-                name: if c.name().is_empty() {
-                    "(unnamed)".to_string()
-                } else {
-                    c.name().to_string()
-                },
-                value: c.value().into(),
-            })
-            .collect()
+        counters.map(CounterSnapshot::from_observable).collect()
     }
 
     /// Collects counters and resets them atomically.
@@ -257,14 +141,7 @@ impl JsonObserver {
         counters: impl Iterator<Item = &'a dyn Observable>,
     ) -> Vec<CounterSnapshot> {
         counters
-            .map(|c| CounterSnapshot {
-                name: if c.name().is_empty() {
-                    "(unnamed)".to_string()
-                } else {
-                    c.name().to_string()
-                },
-                value: c.value_and_reset().into(),
-            })
+            .map(CounterSnapshot::from_observable_and_reset)
             .collect()
     }
 
@@ -364,6 +241,7 @@ mod tests {
     use crate::counters::minimum::Minimum;
     use crate::counters::signed::Signed;
     use crate::counters::unsigned::Unsigned;
+    use crate::counters::CounterValue;
 
     #[test]
     fn test_to_json_empty() {
@@ -484,7 +362,7 @@ mod tests {
 
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].name, "collected");
-        assert_eq!(snapshots[0].value, CounterSnapshotValue::Unsigned(25));
+        assert_eq!(snapshots[0].value, CounterValue::Unsigned(25));
     }
 
     #[test]
@@ -533,7 +411,7 @@ mod tests {
         let snapshot: CounterSnapshot = serde_json::from_str(json).unwrap();
 
         assert_eq!(snapshot.name, "test");
-        assert_eq!(snapshot.value, CounterSnapshotValue::Unsigned(42));
+        assert_eq!(snapshot.value, CounterValue::Unsigned(42));
     }
 
     #[test]
@@ -551,11 +429,11 @@ mod tests {
         let snapshot = MetricsSnapshot::new(vec![
             CounterSnapshot {
                 name: "foo".to_string(),
-                value: CounterSnapshotValue::Unsigned(1),
+                value: CounterValue::Unsigned(1),
             },
             CounterSnapshot {
                 name: "bar".to_string(),
-                value: CounterSnapshotValue::Unsigned(2),
+                value: CounterValue::Unsigned(2),
             },
         ]);
 
@@ -565,13 +443,13 @@ mod tests {
     }
 
     #[test]
-    fn test_counter_snapshot_value_conversions() {
-        let unsigned = CounterSnapshotValue::Unsigned(100);
+    fn test_counter_value_conversions() {
+        let unsigned = CounterValue::Unsigned(100);
         assert_eq!(unsigned.as_i64(), 100);
         assert_eq!(unsigned.as_u64(), 100);
         assert_eq!(unsigned.as_f64(), 100.0);
 
-        let signed = CounterSnapshotValue::Signed(-50);
+        let signed = CounterValue::Signed(-50);
         assert_eq!(signed.as_i64(), -50);
         assert_eq!(signed.as_f64(), -50.0);
     }
