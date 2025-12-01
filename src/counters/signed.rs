@@ -355,7 +355,6 @@ mod tests {
             handle.join().unwrap();
         }
 
-        // 2 threads * 100 incr - 2 threads * 100 decr = 0
         assert_eq!(counter.value(), CounterValue::Signed(0));
     }
 

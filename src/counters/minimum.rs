@@ -232,7 +232,6 @@ mod tests {
     #[test]
     fn test_new() {
         let counter = Minimum::new();
-        // Inizialmente è MAX perché nessun valore è stato osservato
         assert_eq!(counter.value(), CounterValue::Unsigned(u64::MAX));
     }
 
@@ -260,9 +259,9 @@ mod tests {
         counter.observe(10);
         assert_eq!(counter.value(), CounterValue::Unsigned(10));
         counter.observe(50);
-        assert_eq!(counter.value(), CounterValue::Unsigned(10)); // Rimane 10
+        assert_eq!(counter.value(), CounterValue::Unsigned(10));
         counter.observe(100);
-        assert_eq!(counter.value(), CounterValue::Unsigned(10)); // Rimane 10
+        assert_eq!(counter.value(), CounterValue::Unsigned(10));
     }
 
     #[test]
@@ -308,7 +307,6 @@ mod tests {
         assert_eq!(counter.value(), CounterValue::Unsigned(30));
         let min = counter.value_and_reset();
         assert_eq!(min, CounterValue::Unsigned(30));
-        // Dopo il reset torna a MAX
         assert_eq!(counter.value(), CounterValue::Unsigned(u64::MAX));
     }
 
@@ -357,7 +355,6 @@ mod tests {
         let counter = Arc::new(Minimum::new());
         let mut handles = vec![];
 
-        // Ogni thread osserva valori diversi
         for i in 0..4 {
             let counter_clone = Arc::clone(&counter);
             let handle = thread::spawn(move || {
@@ -372,7 +369,6 @@ mod tests {
             handle.join().unwrap();
         }
 
-        // Il minimo dovrebbe essere 1000 (thread 0, j=0 -> (0+1)*1000 + 0 = 1000)
         assert_eq!(counter.value(), CounterValue::Unsigned(1000));
     }
 

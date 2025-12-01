@@ -577,10 +577,6 @@ mod tests {
             handle.join().unwrap();
         }
 
-        // 4 thread × 100 osservazioni = 400 osservazioni
-        // Ogni thread osserva 1+2+...+100 = 5050
-        // Totale: 4 × 5050 = 20200
-        // Media: 20200 / 400 = 50.5 -> troncato a 50
         assert_eq!(counter.count(), 400);
         assert_eq!(counter.sum(), 20200);
         assert_eq!(counter.average(), Some(50));
@@ -608,7 +604,6 @@ mod tests {
     #[test]
     fn test_observable_value_empty() {
         let counter = Average::new();
-        // Quando non ci sono osservazioni, value() ritorna 0
         assert_eq!(counter.value(), CounterValue::Unsigned(0));
     }
 
@@ -626,7 +621,7 @@ mod tests {
         counter.add_sum(100);
         assert_eq!(counter.sum(), 100);
         assert_eq!(counter.count(), 0);
-        assert_eq!(counter.average(), None); // count è 0
+        assert_eq!(counter.average(), None);
     }
 
     #[test]
@@ -635,7 +630,7 @@ mod tests {
         counter.add_count(5);
         assert_eq!(counter.sum(), 0);
         assert_eq!(counter.count(), 5);
-        assert_eq!(counter.average(), Some(0)); // 0 / 5 = 0
+        assert_eq!(counter.average(), Some(0));
     }
 
     #[test]
@@ -670,13 +665,10 @@ mod tests {
     #[test]
     fn test_combined_operations() {
         let counter = Average::new();
-        // Osserva alcuni valori normalmente
         counter.observe(10);
         counter.observe(20);
-        // Poi aggiungi somma e count separatamente
         counter.add_sum(30);
         counter.incr();
-        // Totale: sum = 10 + 20 + 30 = 60, count = 1 + 1 + 1 = 3
         assert_eq!(counter.sum(), 60);
         assert_eq!(counter.count(), 3);
         assert_eq!(counter.average(), Some(20));
