@@ -132,7 +132,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.3", features = ["table"] }
+//! contatori = { version = "0.5", features = ["table"] }
 //! ```
 //!
 //! ```rust,ignore
@@ -151,7 +151,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.3", features = ["serde_json"] }
+//! contatori = { version = "0.5", features = ["serde_json"] }
 //! ```
 //!
 //! ```rust,ignore
@@ -166,7 +166,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.3", features = ["prometheus"] }
+//! contatori = { version = "0.5", features = ["prometheus"] }
 //! ```
 //!
 //! ```rust,ignore

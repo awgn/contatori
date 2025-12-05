@@ -9,7 +9,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.3", features = ["json"] }
+//! contatori = { version = "0.5", features = ["json"] }
 //! ```
 //!
 //! # Examples
