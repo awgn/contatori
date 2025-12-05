@@ -49,13 +49,14 @@ The sharded counter is **~72x faster** than a naive atomic counter under high co
 
 ## Available Counter Types
 
-| Type | Description | Use Case |
-|------|-------------|----------|
-| `Unsigned` | Unsigned integer counter | Event counts, request totals |
-| `Signed` | Signed integer counter | Gauges, balance tracking |
-| `Minimum` | Tracks minimum observed value | Latency minimums |
-| `Maximum` | Tracks maximum observed value | Latency maximums, peak values |
-| `Average` | Computes running average | Average latency, mean values |
+| Type | Description | Use Case | `MetricKind` |
+|------|-------------|----------|--------------|
+| `Monotone` | Monotonically increasing counter (never resets) | Prometheus counters, total requests | `Counter` |
+| `Unsigned` | Unsigned integer counter | Event counts, request totals | `Gauge` |
+| `Signed` | Signed integer counter | Gauges, balance tracking | `Gauge` |
+| `Minimum` | Tracks minimum observed value | Latency minimums | `Gauge` |
+| `Maximum` | Tracks maximum observed value | Latency maximums, peak values | `Gauge` |
+| `Average` | Computes running average | Average latency, mean values | `Gauge` |
 
 ## Quick Start
 
@@ -63,7 +64,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-contatori = "0.3.0"
+contatori = "0.5"
 ```
 
 ### Basic Usage
@@ -163,7 +164,7 @@ The `snapshot` module provides serializable types that work with any serde-compa
 
 ```toml
 [dependencies]
-contatori = { version = "0.3", features = ["serde"] }
+contatori = { version = "0.5", features = ["serde"] }
 ```
 
 ```rust
@@ -194,7 +195,7 @@ Renders counters as formatted ASCII tables using the `tabled` crate.
 
 ```toml
 [dependencies]
-contatori = { version = "0.3", features = ["table"] }
+contatori = { version = "0.5", features = ["table"] }
 ```
 
 ```rust
@@ -253,7 +254,7 @@ Serializes counters to JSON format using serde.
 
 ```toml
 [dependencies]
-contatori = { version = "0.3", features = ["json"] }
+contatori = { version = "0.5", features = ["json"] }
 ```
 
 ```rust
@@ -300,7 +301,7 @@ Exports counters in Prometheus exposition format using the official `prometheus`
 
 ```toml
 [dependencies]
-contatori = { version = "0.3", features = ["prometheus"] }
+contatori = { version = "0.5", features = ["prometheus"] }
 ```
 
 #### Automatic Metric Type Detection
