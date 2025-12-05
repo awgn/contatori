@@ -303,33 +303,69 @@ Exports counters in Prometheus exposition format using the official `prometheus`
 contatori = { version = "0.3", features = ["prometheus"] }
 ```
 
+#### Automatic Metric Type Detection
+
+The observer automatically determines the correct Prometheus metric type based on the counter's `metric_kind()` method:
+
+| Counter Type | `MetricKind` | Prometheus Type |
+|--------------|--------------|-----------------|
+| `Monotone` | `Counter` | Counter |
+| `Unsigned` | `Gauge` | Gauge |
+| `Signed` | `Gauge` | Gauge |
+| `Minimum` | `Gauge` | Gauge |
+| `Maximum` | `Gauge` | Gauge |
+| `Average` | `Gauge` | Gauge |
+
+This means you don't need to manually specify types for most use cases:
+
+```rust
+use contatori::counters::monotone::Monotone;
+use contatori::counters::signed::Signed;
+use contatori::counters::{Observable, MetricKind};
+use contatori::observers::prometheus::PrometheusObserver;
+
+// Monotone returns MetricKind::Counter, auto-detected as Prometheus Counter
+let requests = Monotone::new().with_name("http_requests_total");
+assert_eq!(requests.metric_kind(), MetricKind::Counter);
+requests.add(1000);
+
+// Signed returns MetricKind::Gauge, auto-detected as Prometheus Gauge
+let connections = Signed::new().with_name("active_connections");
+assert_eq!(connections.metric_kind(), MetricKind::Gauge);
+connections.add(42);
+
+let counters: Vec<&dyn Observable> = vec![&requests, &connections];
+
+let observer = PrometheusObserver::new()
+    .with_namespace("myapp")
+    .with_help("http_requests_total", "Total number of HTTP requests")
+    .with_help("active_connections", "Current number of active connections");
+
+let output = observer.render(counters.into_iter()).unwrap();
+// Output will have:
+// # TYPE myapp_http_requests_total counter
+// # TYPE myapp_active_connections gauge
+```
+
+#### Manual Type Override
+
+You can override the auto-detected type using `with_type()`:
+
 ```rust
 use contatori::counters::unsigned::Unsigned;
 use contatori::counters::Observable;
 use contatori::observers::prometheus::{PrometheusObserver, MetricType};
 
 let requests = Unsigned::new().with_name("http_requests_total");
-let errors = Unsigned::new().with_name("http_errors_total");
-let connections = Unsigned::new().with_name("active_connections");
-
 requests.add(1000);
-errors.add(5);
-connections.add(42);
 
-let counters: Vec<&dyn Observable> = vec![&requests, &errors, &connections];
+let counters: Vec<&dyn Observable> = vec![&requests];
 
+// Force Unsigned to be exported as Counter instead of Gauge
 let observer = PrometheusObserver::new()
-    .with_namespace("myapp")
-    .with_const_label("instance", "localhost:8080")
-    .with_type("http_requests_total", MetricType::Counter)
-    .with_type("http_errors_total", MetricType::Counter)
-    .with_type("active_connections", MetricType::Gauge)
-    .with_help("http_requests_total", "Total number of HTTP requests")
-    .with_help("http_errors_total", "Total number of HTTP errors")
-    .with_help("active_connections", "Current number of active connections");
+    .with_type("http_requests_total", MetricType::Counter);
 
 let output = observer.render(counters.into_iter()).unwrap();
-println!("{}", output);
 ```
 
 #### PrometheusObserver Configuration
@@ -339,18 +375,17 @@ println!("{}", output);
 | `with_namespace(str)` | Sets a prefix for all metric names (e.g., `myapp_`) |
 | `with_subsystem(str)` | Sets a subsystem between namespace and metric name |
 | `with_const_label(name, value)` | Adds a constant label to all metrics |
-| `with_type(name, MetricType)` | Sets the metric type (`Counter` or `Gauge`) |
+| `with_type(name, MetricType)` | Overrides auto-detected metric type (`Counter` or `Gauge`) |
 | `with_help(name, text)` | Sets the help text for a specific metric |
-| `with_default_type(MetricType)` | Sets the default type for unconfigured metrics |
 | `render(iter)` | Renders counters to Prometheus exposition format |
 | `render_and_reset(iter)` | Renders and atomically resets all counters |
 
 #### Metric Types
 
-| Type | Description | Use Case |
-|------|-------------|----------|
-| `MetricType::Counter` | Cumulative metric that only goes up | Total requests, errors, bytes sent |
-| `MetricType::Gauge` | Value that can go up and down | Active connections, queue size, temperature |
+| Prometheus Type | Description | Auto-detected from `MetricKind` |
+|-----------------|-------------|--------------------------------|
+| `MetricType::Counter` | Cumulative metric that only goes up | `MetricKind::Counter` (`Monotone`) |
+| `MetricType::Gauge` | Value that can go up and down | `MetricKind::Gauge` (all other counters) |
 
 ## Adapters 
 

@@ -45,6 +45,7 @@ pub mod maximum;
 pub mod minimum;
 pub mod signed;
 pub mod unsigned;
+pub mod monotone;
 
 use atomic_traits::Atomic;
 #[cfg(feature = "serde")]
@@ -204,6 +205,48 @@ impl CounterValue {
     }
 }
 
+/// The kind of metric a counter represents.
+///
+/// This is used by observers (like Prometheus) to determine how to export
+/// the metric with the correct type semantics.
+///
+/// # Examples
+///
+/// ```rust
+/// use contatori::counters::{Observable, MetricKind};
+/// use contatori::counters::monotone::Monotone;
+/// use contatori::counters::unsigned::Unsigned;
+///
+/// // Monotone counters are exported as Counter (monotonically increasing)
+/// let requests = Monotone::new();
+/// assert_eq!(requests.metric_kind(), MetricKind::Counter);
+///
+/// // Unsigned counters are exported as Gauge (can go up or down when reset)
+/// let connections = Unsigned::new();
+/// assert_eq!(connections.metric_kind(), MetricKind::Gauge);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MetricKind {
+    /// A gauge is a metric that can go up and down.
+    ///
+    /// Use for values like current connections, temperature, queue size.
+    /// Most counter types in this crate are gauges because they can be reset.
+    #[default]
+    Gauge,
+
+    /// A counter is a cumulative metric that only ever goes up.
+    ///
+    /// Use for values like total requests, errors, bytes sent.
+    /// Only [`Monotone`](crate::counters::monotone::Monotone) counters are true counters.
+    Counter,
+
+    /// A histogram samples observations and counts them in buckets.
+    ///
+    /// Use for values like request latencies, response sizes.
+    /// **Not yet supported** - reserved for future use.
+    Histogram,
+}
+
 /// A trait for types that can be observed to retrieve their current value.
 ///
 /// This trait provides a common interface for all counter types, allowing
@@ -241,6 +284,35 @@ pub trait Observable: Debug {
     /// using the `with_name()` builder method. Returns an empty string if
     /// no name was set.
     fn name(&self) -> &str;
+
+    /// Returns the kind of metric this counter represents.
+    ///
+    /// This is used by observers (like Prometheus) to determine how to
+    /// export the metric:
+    ///
+    /// - [`MetricKind::Counter`] → monotonically increasing values
+    /// - [`MetricKind::Gauge`] → values that can go up or down
+    /// - [`MetricKind::Histogram`] → distributions (not yet supported)
+    ///
+    /// The default implementation returns [`MetricKind::Gauge`], which is
+    /// appropriate for most counter types.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use contatori::counters::monotone::Monotone;
+    /// use contatori::counters::unsigned::Unsigned;
+    /// use contatori::counters::{Observable, MetricKind};
+    ///
+    /// let monotone = Monotone::new();
+    /// assert_eq!(monotone.metric_kind(), MetricKind::Counter);
+    ///
+    /// let unsigned = Unsigned::new();
+    /// assert_eq!(unsigned.metric_kind(), MetricKind::Gauge);
+    /// ```
+    fn metric_kind(&self) -> MetricKind {
+        MetricKind::Gauge
+    }
 
     /// Returns the current aggregated value of the counter.
     ///

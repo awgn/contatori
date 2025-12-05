@@ -77,7 +77,7 @@
 //! let observer = PrometheusObserver::with_registry(registry);
 //! ```
 
-use crate::counters::{CounterValue, Observable};
+use crate::counters::{CounterValue, MetricKind, Observable};
 use prometheus::{Encoder, IntCounter, IntGauge, Registry, TextEncoder};
 use std::collections::HashMap;
 use std::fmt;
@@ -145,7 +145,8 @@ pub enum MetricType {
 #[derive(Debug, Clone, Default)]
 pub struct MetricConfig {
     /// The type of metric (Counter or Gauge).
-    pub metric_type: MetricType,
+    /// If `None`, the type is auto-detected based on the counter's `metric_kind` method.
+    pub metric_type: Option<MetricType>,
     /// Help text describing the metric.
     pub help: Option<String>,
     /// Additional labels specific to this metric.
@@ -185,8 +186,6 @@ pub struct PrometheusObserver {
     const_labels: HashMap<String, String>,
     /// Per-metric configuration.
     metric_configs: HashMap<String, MetricConfig>,
-    /// Default metric type when not specified.
-    default_type: MetricType,
 }
 
 impl Default for PrometheusObserver {
@@ -197,6 +196,12 @@ impl Default for PrometheusObserver {
 
 impl PrometheusObserver {
     /// Creates a new `PrometheusObserver` with a fresh registry.
+    ///
+    /// Metrics are exported based on their [`metric_kind()`](crate::counters::Observable::metric_kind) method:
+    /// - [`MetricKind::Counter`](crate::counters::MetricKind::Counter) → Prometheus Counter
+    /// - [`MetricKind::Gauge`](crate::counters::MetricKind::Gauge) → Prometheus Gauge
+    ///
+    /// This behavior can be overridden per-metric using [`with_type()`](Self::with_type).
     pub fn new() -> Self {
         Self {
             registry: Registry::new(),
@@ -204,7 +209,6 @@ impl PrometheusObserver {
             subsystem: None,
             const_labels: HashMap::new(),
             metric_configs: HashMap::new(),
-            default_type: MetricType::Counter,
         }
     }
 
@@ -219,7 +223,6 @@ impl PrometheusObserver {
             subsystem: None,
             const_labels: HashMap::new(),
             metric_configs: HashMap::new(),
-            default_type: MetricType::Counter,
         }
     }
 
@@ -256,12 +259,6 @@ impl PrometheusObserver {
         self
     }
 
-    /// Sets the default metric type for metrics without explicit configuration.
-    pub fn with_default_type(mut self, metric_type: MetricType) -> Self {
-        self.default_type = metric_type;
-        self
-    }
-
     /// Configures a specific metric.
     pub fn with_metric_config(mut self, name: &str, config: MetricConfig) -> Self {
         self.metric_configs.insert(name.to_string(), config);
@@ -269,11 +266,13 @@ impl PrometheusObserver {
     }
 
     /// Sets the metric type for a specific metric.
+    ///
+    /// This overrides the auto-detection based on `metric_kind()`.
     pub fn with_type(mut self, name: &str, metric_type: MetricType) -> Self {
         self.metric_configs
             .entry(name.to_string())
             .or_default()
-            .metric_type = metric_type;
+            .metric_type = Some(metric_type);
         self
     }
 
@@ -353,7 +352,15 @@ impl PrometheusObserver {
 
             let full_name = self.build_full_name(raw_name);
             let config = self.metric_configs.get(raw_name);
-            let metric_type = config.map(|c| c.metric_type).unwrap_or(self.default_type);
+            // Use explicit config if set, otherwise auto-detect based on metric_kind()
+            let metric_type = config
+                .and_then(|c| c.metric_type)
+                .unwrap_or_else(|| {
+                    match counter.metric_kind() {
+                        MetricKind::Counter => MetricType::Counter,
+                        MetricKind::Gauge | MetricKind::Histogram => MetricType::Gauge,
+                    }
+                });
             let help = config
                 .and_then(|c| c.help.clone())
                 .unwrap_or_else(|| format!("{} metric", raw_name));
@@ -404,7 +411,15 @@ impl PrometheusObserver {
 
             let full_name = self.build_full_name(raw_name);
             let config = self.metric_configs.get(raw_name);
-            let metric_type = config.map(|c| c.metric_type).unwrap_or(self.default_type);
+            // Use explicit config if set, otherwise auto-detect based on metric_kind()
+            let metric_type = config
+                .and_then(|c| c.metric_type)
+                .unwrap_or_else(|| {
+                    match counter.metric_kind() {
+                        MetricKind::Counter => MetricType::Counter,
+                        MetricKind::Gauge | MetricKind::Histogram => MetricType::Gauge,
+                    }
+                });
             let help = config
                 .and_then(|c| c.help.clone())
                 .unwrap_or_else(|| format!("{} metric", raw_name));
@@ -597,7 +612,8 @@ mod tests {
         let output = observer.render(counters.into_iter()).unwrap();
 
         assert!(output.contains("# HELP http_requests Total HTTP requests received"));
-        assert!(output.contains("# TYPE http_requests counter"));
+        // Unsigned is not monotonic, so it should be a gauge
+        assert!(output.contains("# TYPE http_requests gauge"));
         assert!(output.contains("http_requests 50"));
     }
 
@@ -769,18 +785,6 @@ mod tests {
     }
 
     #[test]
-    fn test_with_default_type() {
-        let counter = Unsigned::new().with_name("test");
-        counter.add(10);
-
-        let observer = PrometheusObserver::new().with_default_type(MetricType::Gauge);
-        let counters: Vec<&dyn Observable> = vec![&counter];
-        let output = observer.render(counters.into_iter()).unwrap();
-
-        assert!(output.contains("# TYPE test gauge"));
-    }
-
-    #[test]
     fn test_with_custom_registry() {
         let registry = Registry::new();
         let observer = PrometheusObserver::with_registry(registry);
@@ -856,5 +860,112 @@ mod tests {
         assert!(output.contains("instance=\"server-1\""));
         assert!(output.contains("method=\"POST\""));
         assert!(output.contains("50"));
+    }
+
+    #[test]
+    fn test_auto_detect_metric_type_from_metric_kind() {
+        use crate::counters::monotone::Monotone;
+
+        // Monotone counter should be auto-detected as Counter (MetricKind::Counter)
+        let monotone = Monotone::new().with_name("monotone_metric");
+        monotone.add(100);
+
+        // Unsigned counter should be auto-detected as Gauge (MetricKind::Gauge)
+        let unsigned = Unsigned::new().with_name("unsigned_metric");
+        unsigned.add(200);
+
+        // Signed counter should be auto-detected as Gauge (MetricKind::Gauge)
+        let signed = Signed::new().with_name("signed_metric");
+        signed.add(300);
+
+        let observer = PrometheusObserver::new();
+        let counters: Vec<&dyn Observable> = vec![&monotone, &unsigned, &signed];
+        let output = observer.render(counters.into_iter()).unwrap();
+
+        // Monotone should be a counter
+        assert!(output.contains("# TYPE monotone_metric counter"));
+        assert!(output.contains("monotone_metric 100"));
+
+        // Unsigned should be a gauge
+        assert!(output.contains("# TYPE unsigned_metric gauge"));
+        assert!(output.contains("unsigned_metric 200"));
+
+        // Signed should be a gauge
+        assert!(output.contains("# TYPE signed_metric gauge"));
+        assert!(output.contains("signed_metric 300"));
+    }
+
+    #[test]
+    fn test_explicit_type_overrides_auto_detect() {
+        use crate::counters::monotone::Monotone;
+
+        // Monotone is monotonic, but we explicitly set it as Gauge
+        let monotone = Monotone::new().with_name("forced_gauge");
+        monotone.add(100);
+
+        // Unsigned is not monotonic, but we explicitly set it as Counter
+        let unsigned = Unsigned::new().with_name("forced_counter");
+        unsigned.add(200);
+
+        let observer = PrometheusObserver::new()
+            .with_type("forced_gauge", MetricType::Gauge)
+            .with_type("forced_counter", MetricType::Counter);
+
+        let counters: Vec<&dyn Observable> = vec![&monotone, &unsigned];
+        let output = observer.render(counters.into_iter()).unwrap();
+
+        // Explicit type should override auto-detection
+        assert!(output.contains("# TYPE forced_gauge gauge"));
+        assert!(output.contains("# TYPE forced_counter counter"));
+    }
+
+    #[test]
+    fn test_labeled_monotone_preserves_metric_kind() {
+        use crate::adapters::Labeled;
+        use crate::counters::monotone::Monotone;
+
+        // Labeled wrapper should preserve metric_kind from inner counter
+        let labeled_monotone = Labeled::new(Monotone::new().with_name("labeled_monotone"))
+            .with_label("env", "prod");
+        labeled_monotone.add(100);
+
+        let labeled_unsigned = Labeled::new(Unsigned::new().with_name("labeled_unsigned"))
+            .with_label("env", "prod");
+        labeled_unsigned.add(200);
+
+        let observer = PrometheusObserver::new();
+        let counters: Vec<&dyn Observable> = vec![&labeled_monotone, &labeled_unsigned];
+        let output = observer.render(counters.into_iter()).unwrap();
+
+        // Labeled Monotone should still be detected as counter
+        assert!(output.contains("# TYPE labeled_monotone counter"));
+
+        // Labeled Unsigned should still be detected as gauge
+        assert!(output.contains("# TYPE labeled_unsigned gauge"));
+    }
+
+    #[test]
+    fn test_non_resettable_monotone_preserves_metric_kind() {
+        use crate::adapters::NonResettable;
+        use crate::counters::monotone::Monotone;
+
+        // NonResettable wrapper should preserve metric_kind from inner counter
+        let non_resettable_monotone =
+            NonResettable::new(Monotone::new().with_name("nr_monotone"));
+        non_resettable_monotone.add(100);
+
+        let non_resettable_unsigned =
+            NonResettable::new(Unsigned::new().with_name("nr_unsigned"));
+        non_resettable_unsigned.add(200);
+
+        let observer = PrometheusObserver::new();
+        let counters: Vec<&dyn Observable> = vec![&non_resettable_monotone, &non_resettable_unsigned];
+        let output = observer.render(counters.into_iter()).unwrap();
+
+        // NonResettable Monotone should still be detected as counter
+        assert!(output.contains("# TYPE nr_monotone counter"));
+
+        // NonResettable Unsigned should still be detected as gauge
+        assert!(output.contains("# TYPE nr_unsigned gauge"));
     }
 }

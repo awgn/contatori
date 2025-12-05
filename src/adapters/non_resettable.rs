@@ -19,7 +19,7 @@
 //! assert_eq!(counter.value().as_u64(), 100); // Still 100!
 //! ```
 
-use crate::counters::{CounterValue, Observable};
+use crate::counters::{CounterValue, MetricKind, Observable};
 use std::fmt::{self, Debug};
 use std::ops::Deref;
 
@@ -161,6 +161,13 @@ impl<T: Observable> Observable for NonResettable<T> {
     fn value_and_reset(&self) -> CounterValue {
         // Just return value, don't reset
         self.inner.value()
+    }
+
+    /// Returns the metric kind of the underlying counter.
+    ///
+    /// Delegates to the inner counter's `metric_kind()` method.
+    fn metric_kind(&self) -> MetricKind {
+        self.inner.metric_kind()
     }
 }
 

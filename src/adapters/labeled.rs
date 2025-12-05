@@ -25,7 +25,7 @@
 //! }
 //! ```
 
-use crate::counters::{CounterValue, Observable};
+use crate::counters::{CounterValue, MetricKind, Observable};
 use std::fmt::{self, Debug};
 use std::ops::Deref;
 
@@ -283,6 +283,13 @@ impl<T: Observable> Observable for Labeled<T> {
 
     fn labels(&self) -> &[(String, String)] {
         &self.labels
+    }
+
+    /// Returns the metric kind of the underlying counter.
+    ///
+    /// Delegates to the inner counter's `metric_kind()` method.
+    fn metric_kind(&self) -> MetricKind {
+        self.inner.metric_kind()
     }
 }
 
