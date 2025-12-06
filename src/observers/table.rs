@@ -360,44 +360,6 @@ impl TableObserver {
         }
     }
 
-    /// Renders counters in compact mode with reset.
-    fn render_compact_and_reset<'a>(&self, counters: impl Iterator<Item = &'a dyn Observable>) -> String {
-        let cells: Vec<String> = counters
-            .map(|c| {
-                let name = if c.name().is_empty() {
-                    "(unnamed)"
-                } else {
-                    c.name()
-                };
-                self.format_compact_cell(name, &c.value_and_reset().to_string())
-            })
-            .collect();
-
-        if cells.is_empty() {
-            return String::new();
-        }
-
-        let cols = self.config.columns;
-        let mut builder = Builder::default();
-
-        for chunk in cells.chunks(cols) {
-            let mut row: Vec<String> = chunk.to_vec();
-            while row.len() < cols {
-                row.push(self.config.empty_cell.clone());
-            }
-            builder.push_record(row);
-        }
-
-        let mut table = builder.build();
-        self.apply_style(&mut table);
-
-        if let Some(ref title) = self.config.title {
-            format!("{}\n{}", title, table)
-        } else {
-            table.to_string()
-        }
-    }
-
     /// Renders counters in standard mode (two-column table).
     fn render_standard<'a>(&self, counters: impl Iterator<Item = &'a dyn Observable>) -> String {
         let rows: Vec<CounterRow> = counters
@@ -408,33 +370,6 @@ impl TableObserver {
                     c.name().to_string()
                 },
                 value: c.value().to_string(),
-            })
-            .collect();
-
-        let mut table = Table::new(&rows);
-        self.apply_style(&mut table);
-
-        if !self.config.show_header {
-            table.with(tabled::settings::Remove::row(tabled::settings::object::Rows::first()));
-        }
-
-        if let Some(ref title) = self.config.title {
-            format!("{}\n{}", title, table)
-        } else {
-            table.to_string()
-        }
-    }
-
-    /// Renders counters in standard mode with reset.
-    fn render_standard_and_reset<'a>(&self, counters: impl Iterator<Item = &'a dyn Observable>) -> String {
-        let rows: Vec<CounterRow> = counters
-            .map(|c| CounterRow {
-                name: if c.name().is_empty() {
-                    "(unnamed)".to_string()
-                } else {
-                    c.name().to_string()
-                },
-                value: c.value_and_reset().to_string(),
             })
             .collect();
 
@@ -494,25 +429,6 @@ impl TableObserver {
         }
     }
 
-    /// Renders the counters and resets them atomically.
-    ///
-    /// This is useful for periodic metric collection where you want to
-    /// display values for a time window and then start fresh.
-    ///
-    /// # Arguments
-    ///
-    /// * `counters` - An iterator over references to [`Observable`] trait objects
-    ///
-    /// # Returns
-    ///
-    /// A `String` containing the formatted table with values before reset.
-    pub fn render_and_reset<'a>(&self, counters: impl Iterator<Item = &'a dyn Observable>) -> String {
-        if self.config.compact {
-            self.render_compact_and_reset(counters)
-        } else {
-            self.render_standard_and_reset(counters)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -731,32 +647,6 @@ mod tests {
         let output = observer.render(counters.into_iter());
 
         assert!(output.contains("(unnamed): 99"));
-    }
-
-    #[test]
-    fn test_render_and_reset() {
-        let counter = Unsigned::new().with_name("resettable");
-        counter.add(50);
-
-        let observer = TableObserver::new();
-        let counters: Vec<&dyn Observable> = vec![&counter];
-        let output = observer.render_and_reset(counters.into_iter());
-
-        assert!(output.contains("50"));
-        assert_eq!(counter.value(), crate::counters::CounterValue::Unsigned(0));
-    }
-
-    #[test]
-    fn test_render_compact_and_reset() {
-        let counter = Unsigned::new().with_name("resettable");
-        counter.add(75);
-
-        let observer = TableObserver::new().compact(true);
-        let counters: Vec<&dyn Observable> = vec![&counter];
-        let output = observer.render_and_reset(counters.into_iter());
-
-        assert!(output.contains("resettable: 75"));
-        assert_eq!(counter.value(), crate::counters::CounterValue::Unsigned(0));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 
-use crate::counters::{CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX};
+use crate::counters::{sealed, CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX};
 
 /// Internal component that stores sum and count for a single shard.
 ///
@@ -383,18 +383,20 @@ impl Observable for Average {
         CounterValue::Unsigned(self.average().unwrap_or(0) as u64)
     }
 
+    /// Returns the name of this counter.
+    #[inline]
+    fn name(&self) -> &str {
+        self.name
+    }
+}
+
+impl sealed::Resettable for Average {
     /// Returns the average and resets the counter.
     ///
     /// If no values were observed, returns `0`.
     #[inline]
     fn value_and_reset(&self) -> CounterValue {
         CounterValue::Unsigned(self.average_and_reset().unwrap_or(0) as u64)
-    }
-
-    /// Returns the name of this counter.
-    #[inline]
-    fn name(&self) -> &str {
-        self.name
     }
 }
 
@@ -516,12 +518,13 @@ mod tests {
     }
 
     #[test]
-    fn test_value_and_reset_then_observe() {
-        let counter = Average::new();
+    fn test_resettable_then_observe() {
+        use crate::adapters::Resettable;
+        let counter = Resettable::new(Average::new());
         counter.observe(100);
-        counter.value_and_reset();
+        let _ = counter.value(); // reset
         counter.observe(50);
-        assert_eq!(counter.average(), Some(50));
+        assert_eq!(counter.inner().average(), Some(50));
     }
 
     #[test]

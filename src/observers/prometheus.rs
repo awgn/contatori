@@ -198,8 +198,8 @@ impl PrometheusObserver {
     /// Creates a new `PrometheusObserver` with a fresh registry.
     ///
     /// Metrics are exported based on their [`metric_kind()`](crate::counters::Observable::metric_kind) method:
-    /// - [`MetricKind::Counter`](crate::counters::MetricKind::Counter) → Prometheus Counter
-    /// - [`MetricKind::Gauge`](crate::counters::MetricKind::Gauge) → Prometheus Gauge
+    /// - [`MetricKind::Counter`] → Prometheus Counter
+    /// - [`MetricKind::Gauge`] → Prometheus Gauge
     ///
     /// This behavior can be overridden per-metric using [`with_type()`](Self::with_type).
     pub fn new() -> Self {
@@ -388,64 +388,6 @@ impl PrometheusObserver {
         }
 
         // Encode to text format
-        self.encode_registry(&registry)
-    }
-
-    /// Renders counters and resets them atomically.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if metric creation, registration, or encoding fails.
-    pub fn render_and_reset<'a>(
-        &self,
-        counters: impl Iterator<Item = &'a dyn Observable>,
-    ) -> Result<String> {
-        let registry = Registry::new();
-
-        for counter in counters {
-            let raw_name = if counter.name().is_empty() {
-                "unnamed"
-            } else {
-                counter.name()
-            };
-
-            let full_name = self.build_full_name(raw_name);
-            let config = self.metric_configs.get(raw_name);
-            // Use explicit config if set, otherwise auto-detect based on metric_kind()
-            let metric_type = config
-                .and_then(|c| c.metric_type)
-                .unwrap_or_else(|| {
-                    match counter.metric_kind() {
-                        MetricKind::Counter => MetricType::Counter,
-                        MetricKind::Gauge | MetricKind::Histogram => MetricType::Gauge,
-                    }
-                });
-            let help = config
-                .and_then(|c| c.help.clone())
-                .unwrap_or_else(|| format!("{} metric", raw_name));
-
-            let mut labels = self.const_labels.clone();
-            if let Some(cfg) = config {
-                labels.extend(cfg.labels.clone());
-            }
-            // Add labels from the counter itself (e.g., from Labeled wrapper)
-            for (k, v) in counter.labels() {
-                labels.insert(k.clone(), v.clone());
-            }
-
-            // Get value and reset
-            let value = counter.value_and_reset();
-
-            match metric_type {
-                MetricType::Counter => {
-                    self.register_counter(&registry, &full_name, &help, &labels, value)?;
-                }
-                MetricType::Gauge => {
-                    self.register_gauge(&registry, &full_name, &help, &labels, value)?;
-                }
-            }
-        }
-
         self.encode_registry(&registry)
     }
 
@@ -653,22 +595,6 @@ mod tests {
         let output = observer.render(counters.into_iter()).unwrap();
 
         assert!(output.contains("signed_metric -50"));
-    }
-
-    #[test]
-    fn test_render_and_reset() {
-        let counter = Unsigned::new().with_name("resettable");
-        counter.add(100);
-
-        let observer = PrometheusObserver::new();
-        let counters: Vec<&dyn Observable> = vec![&counter];
-
-        let output1 = observer.render_and_reset(counters.into_iter()).unwrap();
-        assert!(output1.contains("resettable 100"));
-
-        let counters: Vec<&dyn Observable> = vec![&counter];
-        let output2 = observer.render(counters.into_iter()).unwrap();
-        assert!(output2.contains("resettable 0"));
     }
 
     #[test]
@@ -945,27 +871,27 @@ mod tests {
     }
 
     #[test]
-    fn test_non_resettable_monotone_preserves_metric_kind() {
-        use crate::adapters::NonResettable;
+    fn test_resettable_monotone_preserves_metric_kind() {
+        use crate::adapters::Resettable;
         use crate::counters::monotone::Monotone;
 
-        // NonResettable wrapper should preserve metric_kind from inner counter
-        let non_resettable_monotone =
-            NonResettable::new(Monotone::new().with_name("nr_monotone"));
-        non_resettable_monotone.add(100);
+        // Resettable wrapper should preserve metric_kind from inner counter
+        let resettable_monotone =
+            Resettable::new(Monotone::new().with_name("r_monotone"));
+        resettable_monotone.add(100);
 
-        let non_resettable_unsigned =
-            NonResettable::new(Unsigned::new().with_name("nr_unsigned"));
-        non_resettable_unsigned.add(200);
+        let resettable_unsigned =
+            Resettable::new(Unsigned::new().with_name("r_unsigned"));
+        resettable_unsigned.add(200);
 
         let observer = PrometheusObserver::new();
-        let counters: Vec<&dyn Observable> = vec![&non_resettable_monotone, &non_resettable_unsigned];
+        let counters: Vec<&dyn Observable> = vec![&resettable_monotone, &resettable_unsigned];
         let output = observer.render(counters.into_iter()).unwrap();
 
-        // NonResettable Monotone should still be detected as counter
-        assert!(output.contains("# TYPE nr_monotone counter"));
+        // Resettable Monotone should still be detected as counter
+        assert!(output.contains("# TYPE r_monotone counter"));
 
-        // NonResettable Unsigned should still be detected as gauge
-        assert!(output.contains("# TYPE nr_unsigned gauge"));
+        // Resettable Unsigned should still be detected as gauge
+        assert!(output.contains("# TYPE r_unsigned gauge"));
     }
 }

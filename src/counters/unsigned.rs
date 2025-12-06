@@ -10,7 +10,7 @@ use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 
 use crate::counters::{
-    CounterValue, GetComponentCounter, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX,
+    sealed, CounterValue, GetComponentCounter, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX,
 };
 
 /// A high-performance unsigned integer counter using sharded atomic storage.
@@ -224,18 +224,20 @@ impl Observable for Unsigned {
         CounterValue::Unsigned(self.total_value() as u64)
     }
 
+    /// Returns the name of this counter.
+    #[inline]
+    fn name(&self) -> &str {
+        self.name
+    }
+}
+
+impl sealed::Resettable for Unsigned {
     /// Returns the total value and resets all shards to zero.
     ///
     /// Useful for periodic metric collection.
     #[inline]
     fn value_and_reset(&self) -> CounterValue {
         CounterValue::Unsigned(self.total_value_and_reset() as u64)
-    }
-
-    /// Returns the name of this counter.
-    #[inline]
-    fn name(&self) -> &str {
-        self.name
     }
 }
 
@@ -313,14 +315,14 @@ mod tests {
     }
 
     #[test]
-    fn test_value_and_reset() {
-        let counter = Unsigned::new();
+    fn test_resettable() {
+        use crate::adapters::Resettable;
+        let counter = Resettable::new(Unsigned::new());
         counter.add(1);
         counter.add(1);
         counter.add(1);
         assert_eq!(counter.value(), CounterValue::Unsigned(3));
-        let total = counter.value_and_reset();
-        assert_eq!(total, CounterValue::Unsigned(3));
+        // After value() the counter should be reset
         assert_eq!(counter.value(), CounterValue::Unsigned(0));
     }
 

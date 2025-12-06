@@ -82,9 +82,28 @@ counter.add(5);
 
 // Read the total value (aggregates all shards)
 println!("Total requests: {}", counter.value());
+// value() does NOT reset the counter - it just reads
+println!("Still: {}", counter.value()); // Still 6
+```
 
-// Read and reset atomically
-let total = counter.value_and_reset();
+### Resettable Counters
+
+To reset a counter when reading (useful for per-period metrics), wrap it with `Resettable`:
+
+```rust
+use contatori::counters::unsigned::Unsigned;
+use contatori::counters::Observable;
+use contatori::adapters::Resettable;
+
+// Create a resettable counter for per-period metrics
+let requests_per_second = Resettable::new(Unsigned::new().with_name("requests_per_second"));
+
+requests_per_second.add(100);
+
+// value() returns the value AND resets the counter
+let count = requests_per_second.value();
+println!("Requests this period: {}", count); // 100
+println!("After reset: {}", requests_per_second.value()); // 0
 ```
 
 ### Multi-threaded Usage
@@ -246,7 +265,8 @@ println!("{}", observer.render(counters.into_iter()));
 | `columns(usize)` | Number of columns in compact mode |
 | `separator(CompactSeparator)` | Separator between name and value in compact mode |
 | `render(iter)` | Renders the counters to a string |
-| `render_and_reset(iter)` | Renders and atomically resets all counters |
+
+**Note:** To reset counters when rendering, wrap them with `Resettable`.
 
 ### JsonObserver
 
@@ -292,8 +312,9 @@ let json = JsonObserver::new()
 | `wrap_in_snapshot(bool)` | Wraps output in a `MetricsSnapshot` object |
 | `include_timestamp(bool)` | Includes timestamp in the snapshot (requires `wrap_in_snapshot`) |
 | `to_json(iter)` | Serializes counters to a JSON string |
-| `to_json_and_reset(iter)` | Serializes and atomically resets all counters |
 | `collect(iter)` | Returns a `Vec<CounterSnapshot>` for custom processing |
+
+**Note:** To reset counters when serializing, wrap them with `Resettable`.
 
 ### PrometheusObserver
 
@@ -379,7 +400,8 @@ let output = observer.render(counters.into_iter()).unwrap();
 | `with_type(name, MetricType)` | Overrides auto-detected metric type (`Counter` or `Gauge`) |
 | `with_help(name, text)` | Sets the help text for a specific metric |
 | `render(iter)` | Renders counters to Prometheus exposition format |
-| `render_and_reset(iter)` | Renders and atomically resets all counters |
+
+**Note:** To reset counters when rendering, wrap them with `Resettable`.
 
 #### Metric Types
 
@@ -390,31 +412,45 @@ let output = observer.render(counters.into_iter()).unwrap();
 
 ## Adapters 
 
-The library provides adapters types that add additional behavior to counters while maintaining compatibility with the `Observable` trait.
+The library provides adapter types that add additional behavior to counters while maintaining compatibility with the `Observable` trait.
 
 | Wrapper | Description |
 |---------|-------------|
-| `NonResettable` | Prevents reset on `value_and_reset()` - for monotonic counters |
+| `Resettable` | Resets counter when `value()` is called - for periodic metrics |
 | `Labeled` | Adds key-value labels/tags to a counter |
 
-### NonResettable
+### Resettable
 
-Wraps a counter to prevent it from being reset when `value_and_reset()` is called. Useful for monotonic counters like Prometheus counters that should never decrease.
+Wraps a counter to reset it when `value()` is called. Useful for evaluating metrics over observation periods (e.g., requests per second, errors per minute).
 
 ```rust
 use contatori::counters::unsigned::Unsigned;
 use contatori::counters::Observable;
-use contatori::adapters::NonResettable;
+use contatori::adapters::Resettable;
 
-let total = NonResettable::new(Unsigned::new().with_name("total_requests"));
+let requests = Resettable::new(Unsigned::new().with_name("requests_per_period"));
+requests.add(100);
+
+// value() returns the value AND resets the counter
+assert_eq!(requests.value().as_u64(), 100);
+assert_eq!(requests.value().as_u64(), 0); // Reset to 0!
+
+requests.add(50);
+assert_eq!(requests.value().as_u64(), 50); // Just this period
+```
+
+Regular counters (without `Resettable`) keep their value across reads:
+
+```rust
+use contatori::counters::unsigned::Unsigned;
+use contatori::counters::Observable;
+
+let total = Unsigned::new().with_name("total_requests");
 total.add(100);
 
-// value_and_reset() returns value but does NOT reset
-assert_eq!(total.value_and_reset().as_u64(), 100);
+// value() just reads, does NOT reset
+assert_eq!(total.value().as_u64(), 100);
 assert_eq!(total.value().as_u64(), 100); // Still 100!
-
-total.add(50);
-assert_eq!(total.value().as_u64(), 150); // Keeps accumulating
 ```
 
 ### Labeled
@@ -448,15 +484,18 @@ Adapters can be combined for more complex behavior:
 
 ```rust
 use contatori::counters::unsigned::Unsigned;
-use contatori::adapters::{NonResettable, Labeled};
+use contatori::counters::Observable;
+use contatori::adapters::{Resettable, Labeled};
 
-// A labeled, non-resettable counter
-let counter = NonResettable::new(
-    Labeled::new(Unsigned::new().with_name("total_bytes"))
+// A labeled, resettable counter for per-period metrics
+let counter = Resettable::new(
+    Labeled::new(Unsigned::new().with_name("bytes_per_period"))
         .with_label("direction", "ingress")
 );
 
 counter.add(1024);
+assert_eq!(counter.value().as_u64(), 1024);
+assert_eq!(counter.value().as_u64(), 0); // Reset after read
 ```
 
 ## When to Use Sharded Counters

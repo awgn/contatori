@@ -10,7 +10,7 @@ use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 
 use crate::counters::{
-    CounterValue, GetComponentCounter, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX,
+    sealed, CounterValue, GetComponentCounter, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX,
 };
 
 /// A high-performance signed integer counter using sharded atomic storage.
@@ -190,16 +190,18 @@ impl Observable for Signed {
         CounterValue::Signed(self.total_value() as i64)
     }
 
-    /// Returns the total value and resets all shards to zero.
-    #[inline]
-    fn value_and_reset(&self) -> CounterValue {
-        CounterValue::Signed(self.total_value_and_reset() as i64)
-    }
-
     /// Returns the name of this counter.
     #[inline]
     fn name(&self) -> &str {
         self.name
+    }
+}
+
+impl sealed::Resettable for Signed {
+    /// Returns the total value and resets all shards to zero.
+    #[inline]
+    fn value_and_reset(&self) -> CounterValue {
+        CounterValue::Signed(self.total_value_and_reset() as i64)
     }
 }
 
@@ -290,13 +292,13 @@ mod tests {
     }
 
     #[test]
-    fn test_value_and_reset() {
-        let counter = Signed::new();
+    fn test_resettable() {
+        use crate::adapters::Resettable;
+        let counter = Resettable::new(Signed::new());
         counter.add(5);
         counter.sub(8);
         assert_eq!(counter.value(), CounterValue::Signed(-3));
-        let total = counter.value_and_reset();
-        assert_eq!(total, CounterValue::Signed(-3));
+        // After value() the counter should be reset
         assert_eq!(counter.value(), CounterValue::Signed(0));
     }
 

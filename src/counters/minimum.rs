@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 
-use crate::counters::{CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX};
+use crate::counters::{sealed, CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX};
 
 /// A high-performance minimum value tracker using sharded atomic storage.
 ///
@@ -186,18 +186,20 @@ impl Observable for Minimum {
         CounterValue::Unsigned(self.raw_value() as u64)
     }
 
+    /// Returns the name of this tracker.
+    #[inline]
+    fn name(&self) -> &str {
+        self.name
+    }
+}
+
+impl sealed::Resettable for Minimum {
     /// Returns the global minimum and resets all shards to `MAX`.
     ///
     /// After reset, the next observed value will become the new minimum.
     #[inline]
     fn value_and_reset(&self) -> CounterValue {
         CounterValue::Unsigned(self.raw_value_and_reset() as u64)
-    }
-
-    /// Returns the name of this tracker.
-    #[inline]
-    fn name(&self) -> &str {
-        self.name
     }
 }
 
@@ -300,21 +302,22 @@ mod tests {
     }
 
     #[test]
-    fn test_value_and_reset() {
-        let counter = Minimum::new();
+    fn test_resettable() {
+        use crate::adapters::Resettable;
+        let counter = Resettable::new(Minimum::new());
         counter.observe(50);
         counter.observe(30);
         assert_eq!(counter.value(), CounterValue::Unsigned(30));
-        let min = counter.value_and_reset();
-        assert_eq!(min, CounterValue::Unsigned(30));
+        // After value() the counter should be reset
         assert_eq!(counter.value(), CounterValue::Unsigned(u64::MAX));
     }
 
     #[test]
-    fn test_value_and_reset_then_observe() {
-        let counter = Minimum::new();
+    fn test_resettable_then_observe() {
+        use crate::adapters::Resettable;
+        let counter = Resettable::new(Minimum::new());
         counter.observe(30);
-        counter.value_and_reset();
+        let _ = counter.value(); // reset
         counter.observe(100);
         assert_eq!(counter.value(), CounterValue::Unsigned(100));
     }

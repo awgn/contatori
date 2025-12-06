@@ -1,6 +1,6 @@
 //! Monotone integer counter with sharded atomic storage.
 //!
-//! This counter type returns [`MetricKind::Counter`](crate::counters::MetricKind::Counter)
+//! This counter type returns [`MetricKind::Counter`]
 //! because it is monotonically increasing and never decreases.
 //!
 //! This module provides [`Monotone`], a high-performance counter optimized for
@@ -13,7 +13,8 @@ use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 
 use crate::counters::{
-    CounterValue, GetComponentCounter, MetricKind, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX,
+    sealed, CounterValue, GetComponentCounter, MetricKind, Observable, NUM_COMPONENTS,
+    THREAD_SLOT_INDEX,
 };
 
 /// A high-performance monotone integer counter using sharded atomic storage.
@@ -179,14 +180,6 @@ impl Observable for Monotone {
         CounterValue::Unsigned(self.total_value() as u64)
     }
 
-    /// Returns the total value. Monotone counter is not resettable.
-    ///
-    /// Useful for periodic metric collection.
-    #[inline]
-    fn value_and_reset(&self) -> CounterValue {
-        CounterValue::Unsigned(self.total_value() as u64)
-    }
-
     /// Returns the name of this counter.
     #[inline]
     fn name(&self) -> &str {
@@ -200,6 +193,17 @@ impl Observable for Monotone {
     #[inline]
     fn metric_kind(&self) -> MetricKind {
         MetricKind::Counter
+    }
+}
+
+impl sealed::Resettable for Monotone {
+    /// Returns the total value. Monotone counter is not resettable.
+    ///
+    /// This returns the same value as `value()` because Monotone counters
+    /// are monotonically increasing and should never be reset.
+    #[inline]
+    fn value_and_reset(&self) -> CounterValue {
+        CounterValue::Unsigned(self.total_value() as u64)
     }
 }
 
@@ -258,16 +262,15 @@ mod tests {
     }
 
     #[test]
-    fn test_value_and_reset() {
-        let counter = Monotone::new();
+    fn test_resettable_monotone_does_not_reset() {
+        use crate::adapters::Resettable;
+        let counter = Resettable::new(Monotone::new());
         counter.add(1);
         counter.add(1);
         counter.add(1);
         assert_eq!(counter.value(), CounterValue::Unsigned(3));
-        let total = counter.value_and_reset();
-        assert_eq!(total, CounterValue::Unsigned(3));
-        // monotone counter does not reset to zero after value_and_reset
-        assert_eq!(counter.local_value(), 3);
+        // monotone counter does not reset to zero after value()
+        assert_eq!(counter.inner().local_value(), 3);
         assert_eq!(counter.value(), CounterValue::Unsigned(3));
     }
 

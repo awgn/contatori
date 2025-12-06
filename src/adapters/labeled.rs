@@ -25,7 +25,7 @@
 //! }
 //! ```
 
-use crate::counters::{CounterValue, MetricKind, Observable};
+use crate::counters::{sealed, CounterValue, MetricKind, Observable};
 use std::fmt::{self, Debug};
 use std::ops::Deref;
 
@@ -277,10 +277,6 @@ impl<T: Observable> Observable for Labeled<T> {
         self.inner.value()
     }
 
-    fn value_and_reset(&self) -> CounterValue {
-        self.inner.value_and_reset()
-    }
-
     fn labels(&self) -> &[(String, String)] {
         &self.labels
     }
@@ -290,6 +286,12 @@ impl<T: Observable> Observable for Labeled<T> {
     /// Delegates to the inner counter's `metric_kind()` method.
     fn metric_kind(&self) -> MetricKind {
         self.inner.metric_kind()
+    }
+}
+
+impl<T: sealed::Resettable> sealed::Resettable for Labeled<T> {
+    fn value_and_reset(&self) -> CounterValue {
+        self.inner.value_and_reset()
     }
 }
 
@@ -392,13 +394,14 @@ mod tests {
     }
 
     #[test]
-    fn test_value_and_reset() {
-        let counter = Labeled::new(Unsigned::new()).with_label("test", "value");
+    fn test_resettable() {
+        use crate::adapters::Resettable;
+        let counter =
+            Resettable::new(Labeled::new(Unsigned::new()).with_label("test", "value"));
 
         counter.add(100);
-        let v = counter.value_and_reset();
-
-        assert_eq!(v, CounterValue::Unsigned(100));
+        assert_eq!(counter.value(), CounterValue::Unsigned(100));
+        // After value() the counter should be reset
         assert_eq!(counter.value(), CounterValue::Unsigned(0));
     }
 

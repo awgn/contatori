@@ -91,9 +91,25 @@
 //!
 //! // Read the total value (aggregates all shards)
 //! println!("Total requests: {}", counter.value());
+//! // value() does NOT reset - it just reads
+//! println!("Still: {}", counter.value()); // Still 6
+//! ```
 //!
-//! // Read and reset atomically
-//! let total = counter.value_and_reset();
+//! ## Resettable Counters
+//!
+//! To reset a counter when reading (useful for per-period metrics), wrap it with `Resettable`:
+//!
+//! ```rust
+//! use contatori::counters::unsigned::Unsigned;
+//! use contatori::counters::Observable;
+//! use contatori::adapters::Resettable;
+//!
+//! let requests = Resettable::new(Unsigned::new().with_name("requests_per_period"));
+//! requests.add(100);
+//!
+//! // value() returns the value AND resets the counter
+//! assert_eq!(requests.value().as_u64(), 100);
+//! assert_eq!(requests.value().as_u64(), 0); // Reset to 0!
 //! ```
 //!
 //! ## Thread Safety

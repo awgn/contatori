@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 
-use crate::counters::{CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX};
+use crate::counters::{sealed, CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX};
 
 /// A high-performance maximum value tracker using sharded atomic storage.
 ///
@@ -183,6 +183,14 @@ impl Observable for Maximum {
         CounterValue::Unsigned(self.raw_value().unwrap_or(0) as u64)
     }
 
+    /// Returns the name of this tracker.
+    #[inline]
+    fn name(&self) -> &str {
+        self.name
+    }
+}
+
+impl sealed::Resettable for Maximum {
     /// Returns the global maximum and resets all shards to `MIN`.
     ///
     /// After reset, the next observed value will become the new maximum.
@@ -190,12 +198,6 @@ impl Observable for Maximum {
     #[inline]
     fn value_and_reset(&self) -> CounterValue {
         CounterValue::Unsigned(self.raw_value_and_reset().unwrap_or(0) as u64)
-    }
-
-    /// Returns the name of this tracker.
-    #[inline]
-    fn name(&self) -> &str {
-        self.name
     }
 }
 
@@ -269,21 +271,22 @@ mod tests {
     }
 
     #[test]
-    fn test_value_and_reset() {
-        let counter = Maximum::new();
+    fn test_resettable() {
+        use crate::adapters::Resettable;
+        let counter = Resettable::new(Maximum::new());
         counter.observe(50);
         counter.observe(100);
         assert_eq!(counter.value(), CounterValue::Unsigned(100));
-        let total = counter.value_and_reset();
-        assert_eq!(total, CounterValue::Unsigned(100));
+        // After value() the counter should be reset
         assert_eq!(counter.value(), CounterValue::Unsigned(0));
     }
 
     #[test]
-    fn test_value_and_reset_then_observe() {
-        let counter = Maximum::new();
+    fn test_resettable_then_observe() {
+        use crate::adapters::Resettable;
+        let counter = Resettable::new(Maximum::new());
         counter.observe(100);
-        counter.value_and_reset();
+        let _ = counter.value(); // reset
         counter.observe(25);
         assert_eq!(counter.value(), CounterValue::Unsigned(25));
     }

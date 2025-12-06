@@ -83,18 +83,6 @@ impl CounterSnapshot {
             value: counter.value(),
         }
     }
-
-    /// Creates a snapshot from an observable counter and resets it atomically.
-    pub fn from_observable_and_reset(counter: &dyn Observable) -> Self {
-        Self {
-            name: if counter.name().is_empty() {
-                "(unnamed)".to_string()
-            } else {
-                counter.name().to_string()
-            },
-            value: counter.value_and_reset(),
-        }
-    }
 }
 
 /// A collection of counter snapshots, typically representing a point-in-time
@@ -150,15 +138,6 @@ impl MetricsSnapshot {
         Self::new(counters.map(CounterSnapshot::from_observable).collect())
     }
 
-    /// Collects snapshots from an iterator of observable counters and resets them.
-    pub fn collect_and_reset<'a>(counters: impl Iterator<Item = &'a dyn Observable>) -> Self {
-        Self::new(
-            counters
-                .map(CounterSnapshot::from_observable_and_reset)
-                .collect(),
-        )
-    }
-
     /// Collects snapshots with a timestamp.
     pub fn collect_with_timestamp<'a>(
         counters: impl Iterator<Item = &'a dyn Observable>,
@@ -200,17 +179,6 @@ mod tests {
 
         let snapshot = CounterSnapshot::from_observable(&counter);
         assert_eq!(snapshot.name, "(unnamed)");
-    }
-
-    #[test]
-    fn test_counter_snapshot_from_observable_and_reset() {
-        let counter = Unsigned::new().with_name("resettable");
-        counter.add(75);
-
-        let snapshot = CounterSnapshot::from_observable_and_reset(&counter);
-        assert_eq!(snapshot.name, "resettable");
-        assert_eq!(snapshot.value, CounterValue::Unsigned(75));
-        assert_eq!(counter.value(), CounterValue::Unsigned(0));
     }
 
     #[test]

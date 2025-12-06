@@ -43,9 +43,9 @@
 pub mod average;
 pub mod maximum;
 pub mod minimum;
+pub mod monotone;
 pub mod signed;
 pub mod unsigned;
-pub mod monotone;
 
 use atomic_traits::Atomic;
 #[cfg(feature = "serde")]
@@ -261,21 +261,31 @@ pub enum MetricKind {
 /// - [`Maximum`](maximum::Maximum) - returns `CounterValue::Unsigned`
 /// - [`Average`](average::Average) - returns `CounterValue::Unsigned` (the computed average)
 ///
-/// # Examples
+/// # Resetting Counters
+///
+/// The `value()` method behavior depends on the counter type:
+///
+/// - **Raw counters** (Unsigned, Signed, etc.): `value()` returns the current value
+///   without resetting.
+/// - **Resettable counters**: When wrapped with [`Resettable`](crate::adapters::Resettable),
+///   `value()` returns the current value AND resets the counter atomically.
 ///
 /// ```rust
 /// use contatori::counters::Observable;
 /// use contatori::counters::unsigned::Unsigned;
+/// use contatori::adapters::Resettable;
 ///
-/// let counter = Unsigned::new().with_name("requests");
+/// // Regular counter: value() does not reset
+/// let counter = Unsigned::new();
 /// counter.add(5);
+/// assert_eq!(counter.value().as_u64(), 5);
+/// assert_eq!(counter.value().as_u64(), 5); // Still 5
 ///
-/// // Use the Observable interface
-/// println!("Name: {}", counter.name());
-/// println!("Value: {}", counter.value());
-///
-/// // Reset and get the value atomically
-/// let final_value = counter.value_and_reset();
+/// // Resettable counter: value() resets after reading
+/// let resettable = Resettable::new(Unsigned::new());
+/// resettable.add(5);
+/// assert_eq!(resettable.value().as_u64(), 5);
+/// assert_eq!(resettable.value().as_u64(), 0); // Reset to 0
 /// ```
 pub trait Observable: Debug {
     /// Returns the name of this counter.
@@ -319,6 +329,10 @@ pub trait Observable: Debug {
     /// This method reads all shards and computes the aggregate value
     /// (sum for counters, min/max for extrema, average for Average).
     ///
+    /// For raw counters, this does **not** reset the counter.
+    /// For counters wrapped with [`Resettable`](crate::adapters::Resettable),
+    /// this returns the value AND resets the counter.
+    ///
     /// # Performance
     ///
     /// Reading requires iterating over all 64 shards, making it more
@@ -326,27 +340,13 @@ pub trait Observable: Debug {
     /// trade-off for counters where writes vastly outnumber reads.
     fn value(&self) -> CounterValue;
 
-    /// Returns the current value and resets the counter atomically.
-    ///
-    /// This is useful for periodic metric collection where you want to
-    /// capture the value since the last collection and start fresh.
-    ///
-    /// # Atomicity Note
-    ///
-    /// While each individual shard is reset atomically, the aggregate
-    /// operation across all shards is not atomic. This means concurrent
-    /// updates during `value_and_reset()` may be partially included in
-    /// either the returned value or the next collection period. For
-    /// metrics and statistics, this is typically acceptable.
-    fn value_and_reset(&self) -> CounterValue;
-
     /// Returns the labels associated with this counter.
     ///
     /// Labels are key-value pairs that provide additional dimensions
     /// for the metric, useful for systems like Prometheus.
     ///
     /// The default implementation returns an empty slice. Counters
-    /// wrapped with [`Labeled`](crate::wrappers::Labeled) will return
+    /// wrapped with [`Labeled`](crate::adapters::Labeled) will return
     /// their configured labels.
     ///
     /// # Example
@@ -371,6 +371,34 @@ impl Display for dyn Observable + '_ {
         } else {
             write!(f, "{}", self.value())
         }
+    }
+}
+
+/// Internal sealed module for reset functionality.
+///
+/// This module contains the internal trait used by the `Resettable` adapter
+/// to access the reset functionality of counters. It is not part of the public API.
+pub(crate) mod sealed {
+    use super::{CounterValue, Observable};
+
+    /// Internal trait for counters that support atomic read-and-reset.
+    ///
+    /// This trait is implemented by all counter types and is used by the
+    /// `Resettable` adapter to perform the reset operation when `value()` is called.
+    ///
+    /// This trait is intentionally not public - the reset behavior is only
+    /// accessible through the `Resettable` wrapper.
+    pub trait Resettable: Observable {
+        /// Returns the current value and resets the counter atomically.
+        ///
+        /// # Atomicity Note
+        ///
+        /// While each individual shard is reset atomically, the aggregate
+        /// operation across all shards is not atomic. This means concurrent
+        /// updates during this method may be partially included in
+        /// either the returned value or the next collection period. For
+        /// metrics and statistics, this is typically acceptable.
+        fn value_and_reset(&self) -> CounterValue;
     }
 }
 

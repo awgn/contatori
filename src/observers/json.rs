@@ -135,16 +135,6 @@ impl JsonObserver {
         counters.map(CounterSnapshot::from_observable).collect()
     }
 
-    /// Collects counters and resets them atomically.
-    pub fn collect_and_reset<'a>(
-        &self,
-        counters: impl Iterator<Item = &'a dyn Observable>,
-    ) -> Vec<CounterSnapshot> {
-        counters
-            .map(CounterSnapshot::from_observable_and_reset)
-            .collect()
-    }
-
     /// Serializes counters to a JSON string.
     ///
     /// # Arguments
@@ -159,32 +149,6 @@ impl JsonObserver {
         counters: impl Iterator<Item = &'a dyn Observable>,
     ) -> Result<String, serde_json::Error> {
         let snapshots = self.collect(counters);
-
-        if self.config.wrap_in_snapshot {
-            let snapshot = if self.config.include_timestamp {
-                MetricsSnapshot::with_timestamp(snapshots, current_timestamp_ms())
-            } else {
-                MetricsSnapshot::new(snapshots)
-            };
-
-            if self.config.pretty {
-                serde_json::to_string_pretty(&snapshot)
-            } else {
-                serde_json::to_string(&snapshot)
-            }
-        } else if self.config.pretty {
-            serde_json::to_string_pretty(&snapshots)
-        } else {
-            serde_json::to_string(&snapshots)
-        }
-    }
-
-    /// Serializes counters to JSON and resets them atomically.
-    pub fn to_json_and_reset<'a>(
-        &self,
-        counters: impl Iterator<Item = &'a dyn Observable>,
-    ) -> Result<String, serde_json::Error> {
-        let snapshots = self.collect_and_reset(counters);
 
         if self.config.wrap_in_snapshot {
             let snapshot = if self.config.include_timestamp {
@@ -336,19 +300,6 @@ mod tests {
 
         assert!(json.contains("timestamp_ms"));
         assert!(json.contains("counters"));
-    }
-
-    #[test]
-    fn test_to_json_and_reset() {
-        let counter = Unsigned::new().with_name("resettable");
-        counter.add(75);
-
-        let observer = JsonObserver::new();
-        let counters: Vec<&dyn Observable> = vec![&counter];
-        let json = observer.to_json_and_reset(counters.into_iter()).unwrap();
-
-        assert!(json.contains("75"));
-        assert_eq!(counter.value(), crate::counters::CounterValue::Unsigned(0));
     }
 
     #[test]

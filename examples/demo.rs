@@ -129,10 +129,6 @@ struct Args {
     #[arg(long, default_value = "10000")]
     iterations: usize,
 
-    /// Reset counters after reading (show delta)
-    #[arg(long)]
-    reset: bool,
-
     /// Add a title to the output (table formats)
     #[arg(long)]
     title: Option<String>,
@@ -240,11 +236,7 @@ fn render_output(args: &Args, counters: Vec<&dyn Observable>) -> String {
                 observer = observer.with_title(title.clone());
             }
 
-            if args.reset {
-                observer.render_and_reset(counters.into_iter())
-            } else {
-                observer.render(counters.into_iter())
-            }
+            observer.render(counters.into_iter())
         }
 
         OutputFormat::Compact => {
@@ -258,11 +250,7 @@ fn render_output(args: &Args, counters: Vec<&dyn Observable>) -> String {
                 observer = observer.with_title(title.clone());
             }
 
-            if args.reset {
-                observer.render_and_reset(counters.into_iter())
-            } else {
-                observer.render(counters.into_iter())
-            }
+            observer.render(counters.into_iter())
         }
 
         OutputFormat::Json => {
@@ -271,12 +259,8 @@ fn render_output(args: &Args, counters: Vec<&dyn Observable>) -> String {
                 .wrap_in_snapshot(args.timestamp)
                 .include_timestamp(args.timestamp);
 
-            if args.reset {
-                observer.to_json_and_reset(counters.into_iter())
-            } else {
-                observer.to_json(counters.into_iter())
-            }
-            .unwrap_or_else(|e| format!("Error: {}", e))
+            observer.to_json(counters.into_iter())
+                .unwrap_or_else(|e| format!("Error: {}", e))
         }
 
         OutputFormat::Prometheus => {
@@ -299,12 +283,8 @@ fn render_output(args: &Args, counters: Vec<&dyn Observable>) -> String {
                 observer = observer.with_const_label("instance", instance);
             }
 
-            if args.reset {
-                observer.render_and_reset(counters.into_iter())
-            } else {
-                observer.render(counters.into_iter())
-            }
-            .unwrap_or_else(|e| format!("Error: {}", e))
+            observer.render(counters.into_iter())
+                .unwrap_or_else(|e| format!("Error: {}", e))
         }
     }
 }
