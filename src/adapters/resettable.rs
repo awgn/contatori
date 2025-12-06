@@ -20,7 +20,7 @@
 //! assert_eq!(counter.value().as_u64(), 0); // Reset to 0!
 //! ```
 
-use crate::counters::{sealed, CounterValue, MetricKind, Observable};
+use crate::counters::{sealed, CounterValue, MetricKind, Observable, ObservableEntry};
 use std::fmt::{self, Debug};
 use std::ops::Deref;
 
@@ -145,7 +145,7 @@ impl<T> Resettable<T> {
 
 impl<T: sealed::Resettable> Observable for Resettable<T> {
     /// Returns the name of the underlying counter.
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         self.inner.name()
     }
 
@@ -164,9 +164,17 @@ impl<T: sealed::Resettable> Observable for Resettable<T> {
         self.inner.metric_kind()
     }
 
-    /// Returns the labels of the underlying counter.
-    fn labels(&self) -> &[(String, String)] {
-        self.inner.labels()
+    /// Expands this observable into entries, using reset values.
+    ///
+    /// For resettable counters, each entry's value is read-and-reset.
+    fn expand(&self) -> Vec<ObservableEntry> {
+        // For a simple resettable counter, return one entry with the reset value
+        vec![ObservableEntry {
+            name: self.inner.name(),
+            label: None,
+            value: self.inner.value_and_reset(),
+            metric_kind: self.inner.metric_kind(),
+        }]
     }
 }
 

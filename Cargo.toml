@@ -1,6 +1,6 @@
 [package]
 name = "contatori"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 authors = ["Nicola Bonelli <nicola.bonelli@gmail.com>"]
 description = "High-performance sharded atomic counters for Rust"
@@ -31,17 +31,29 @@ serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 prometheus = { version = "0.14", optional = true }
+atomic-time = "0.1.5"
 
 [dev-dependencies]
 criterion = "0.5"
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [[bench]]
 name = "counter_benchmark"
 harness = false
 
+[[bench]]
+name = "labeled_group_benchmark"
+harness = false
+
 [[example]]
 name = "demo"
 required-features = ["demo"]
+
+[[example]]
+name = "labeled_group_demo"
+required-features = ["full"]
 
 [package.metadata.docs.rs]
 all-features = true

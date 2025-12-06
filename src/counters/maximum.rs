@@ -185,7 +185,7 @@ impl Observable for Maximum {
 
     /// Returns the name of this tracker.
     #[inline]
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         self.name
     }
 }

@@ -26,6 +26,8 @@ This library solves the contention problem by **sharding** counters across multi
 
 ## Performance Benchmark
 
+### Single Counter: Sharded vs AtomicUsize
+
 Benchmarked on **Apple M2** (8 cores) with **8 threads**, each performing **1,000,000 increments** (8 million total operations):
 
 ```
@@ -47,6 +49,42 @@ Benchmarked on **Apple M2** (8 cores) with **8 threads**, each performing **1,00
 
 The sharded counter is **~72x faster** than a naive atomic counter under high contention. This difference grows with more threads and higher contention.
 
+### Labeled Counters: Contatori vs OpenTelemetry
+
+Benchmarked on **Apple M2** (8 cores) with **8 threads**, each performing **100,000 increments** with labeled counters (HTTP methods: GET/POST/PUT/DELETE):
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              Labeled Counter Performance: Contatori vs OpenTelemetry        │
+│                        (8 threads × 100,000 iterations)                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Distributed labels (rotating GET/POST/PUT/DELETE):                         │
+│                                                                             │
+│  OpenTelemetry Counter  ████████████████████████████████████████  338.83 ms │
+│                                                                             │
+│  contatori labeled_group!                                          0.21 ms  │
+│                                                                             │
+│  Speedup: 1582x faster                                                      │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  High contention (all threads same label):                                  │
+│                                                                             │
+│  OpenTelemetry Counter  ████████████████████████████████████████  341.91 ms │
+│                                                                             │
+│  contatori labeled_group!                                          0.32 ms  │
+│                                                                             │
+│  Speedup: 1056x faster                                                      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+The `labeled_group!` counter is **~1000-1500x faster** than OpenTelemetry counters for high-throughput labeled metrics. This massive difference comes from:
+- **Zero runtime overhead**: Labels are resolved at compile time
+- **Sharded storage**: Each sub-counter uses the same sharding strategy
+- **No dynamic dispatch**: Direct field access instead of hash lookups
+
 ## Available Counter Types
 
 | Type | Description | Use Case | `MetricKind` |
@@ -64,7 +102,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-contatori = "0.5"
+contatori = "0.6"
 ```
 
 ### Basic Usage
@@ -183,7 +221,7 @@ The `snapshot` module provides serializable types that work with any serde-compa
 
 ```toml
 [dependencies]
-contatori = { version = "0.5", features = ["serde"] }
+contatori = { version = "0.6", features = ["serde"] }
 ```
 
 ```rust
@@ -214,7 +252,7 @@ Renders counters as formatted ASCII tables using the `tabled` crate.
 
 ```toml
 [dependencies]
-contatori = { version = "0.5", features = ["table"] }
+contatori = { version = "0.6", features = ["table"] }
 ```
 
 ```rust
@@ -274,7 +312,7 @@ Serializes counters to JSON format using serde.
 
 ```toml
 [dependencies]
-contatori = { version = "0.5", features = ["json"] }
+contatori = { version = "0.6", features = ["json"] }
 ```
 
 ```rust
@@ -322,7 +360,7 @@ Exports counters in Prometheus exposition format using the official `prometheus`
 
 ```toml
 [dependencies]
-contatori = { version = "0.5", features = ["prometheus"] }
+contatori = { version = "0.6", features = ["prometheus"] }
 ```
 
 #### Automatic Metric Type Detection
@@ -414,10 +452,10 @@ let output = observer.render(counters.into_iter()).unwrap();
 
 The library provides adapter types that add additional behavior to counters while maintaining compatibility with the `Observable` trait.
 
-| Wrapper | Description |
-|---------|-------------|
+| Wrapper/Macro | Description |
+|---------------|-------------|
 | `Resettable` | Resets counter when `value()` is called - for periodic metrics |
-| `Labeled` | Adds key-value labels/tags to a counter |
+| `labeled_group!` | Creates a struct of counters with shared metric name and different labels |
 
 ### Resettable
 
@@ -453,50 +491,43 @@ assert_eq!(total.value().as_u64(), 100);
 assert_eq!(total.value().as_u64(), 100); // Still 100!
 ```
 
-### Labeled
+### Labeled Group
 
-Wraps a counter to add key-value labels (tags/dimensions). Particularly useful for Prometheus-style metrics.
-
-```rust
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
-use contatori::adapters::Labeled;
-
-let requests = Labeled::new(Unsigned::new().with_name("http_requests"))
-    .with_label("method", "GET")
-    .with_label("path", "/api/users")
-    .with_label("status", "200");
-
-requests.add(100);
-
-// Access labels
-for (key, value) in requests.labels() {
-    println!("{}: {}", key, value);
-}
-
-// Check specific label
-assert_eq!(requests.get_label("method"), Some("GET"));
-```
-
-### Combining Adapters 
-
-Adapters can be combined for more complex behavior:
+The `labeled_group!` macro creates a struct containing multiple counters that share a metric name but have different label values. This is the recommended way to track metrics with labels (e.g., HTTP requests by method).
 
 ```rust
+use contatori::labeled_group;
 use contatori::counters::unsigned::Unsigned;
 use contatori::counters::Observable;
-use contatori::adapters::{Resettable, Labeled};
 
-// A labeled, resettable counter for per-period metrics
-let counter = Resettable::new(
-    Labeled::new(Unsigned::new().with_name("bytes_per_period"))
-        .with_label("direction", "ingress")
+// Define a labeled group
+labeled_group!(
+    HttpRequests,
+    "http_requests",    // metric name
+    "method",           // label key
+    total: Unsigned,              // no label (aggregate)
+    get: "GET": Unsigned,         // method="GET"
+    post: "POST": Unsigned,       // method="POST"
+    put: "PUT": Unsigned,         // method="PUT"
+    delete: "DELETE": Unsigned,   // method="DELETE"
 );
 
-counter.add(1024);
-assert_eq!(counter.value().as_u64(), 1024);
-assert_eq!(counter.value().as_u64(), 0); // Reset after read
+// Can be used as a static
+static HTTP: HttpRequests = HttpRequests::new();
+
+// Direct field access for incrementing
+HTTP.total.add(1);
+HTTP.get.add(1);
+
+// Observers automatically expand the group:
+// http_requests 1           (no label - the total)
+// http_requests{method="GET"} 1
+// http_requests{method="POST"} 0
+// http_requests{method="PUT"} 0
+// http_requests{method="DELETE"} 0
 ```
+
+The `expand()` method on `Observable` returns all sub-counters with their labels, which observers use automatically.
 
 ## When to Use Sharded Counters
 

@@ -385,7 +385,7 @@ impl Observable for Average {
 
     /// Returns the name of this counter.
     #[inline]
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         self.name
     }
 }

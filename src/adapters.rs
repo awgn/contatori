@@ -8,7 +8,12 @@
 //! | Wrapper | Description |
 //! |---------|-------------|
 //! | [`Resettable`] | Resets counter when `value()` is called - for periodic metrics |
-//! | [`Labeled`] | Adds key-value labels/tags to a counter |
+//!
+//! # Macros
+//!
+//! | Macro | Description |
+//! |-------|-------------|
+//! | [`labeled_group!`](crate::labeled_group) | Creates a struct of labeled counters |
 //!
 //! # Examples
 //!
@@ -27,26 +32,35 @@
 //! assert_eq!(requests_per_period.value().as_u64(), 0); // Reset to 0!
 //! ```
 //!
-//! ## Labeled Counter
+//! ## Labeled Group
 //!
 //! ```rust
+//! use contatori::labeled_group;
 //! use contatori::counters::unsigned::Unsigned;
 //! use contatori::counters::Observable;
-//! use contatori::adapters::Labeled;
 //!
-//! let requests = Labeled::new(Unsigned::new().with_name("http_requests"))
-//!     .with_label("method", "GET")
-//!     .with_label("path", "/api/users");
+//! labeled_group!(
+//!     HttpRequests,
+//!     "http_requests",
+//!     "method",
+//!     total: Unsigned,
+//!     get: "GET": Unsigned,
+//!     post: "POST": Unsigned,
+//! );
 //!
-//! // Labels are accessible for observers (e.g., Prometheus)
-//! for (key, value) in requests.labels() {
-//!     println!("{}: {}", key, value);
+//! static HTTP: HttpRequests = HttpRequests::new();
+//!
+//! // Direct field access for incrementing
+//! HTTP.total.add(1);
+//! HTTP.get.add(1);
+//!
+//! // expand() returns all sub-counters with their label
+//! for entry in HTTP.expand() {
+//!     println!("{}: {:?}", entry.name, entry.label);
 //! }
 //! ```
-//!
 
-mod labeled;
+mod group;
 mod resettable;
 
-pub use labeled::Labeled;
 pub use resettable::Resettable;

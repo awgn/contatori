@@ -9,7 +9,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.5", features = ["table"] }
+//! contatori = { version = "0.6", features = ["table"] }
 //! ```
 //!
 //! # Examples
@@ -156,6 +156,8 @@ impl Default for TableConfig {
 struct CounterRow {
     #[tabled(rename = "Name")]
     name: String,
+    #[tabled(rename = "Labels")]
+    labels: String,
     #[tabled(rename = "Value")]
     value: String,
 }
@@ -324,13 +326,18 @@ impl TableObserver {
     /// Renders counters in compact mode (grid layout).
     fn render_compact<'a>(&self, counters: impl Iterator<Item = &'a dyn Observable>) -> String {
         let cells: Vec<String> = counters
-            .map(|c| {
-                let name = if c.name().is_empty() {
-                    "(unnamed)"
+            .flat_map(|c| c.expand())
+            .map(|entry| {
+                let name = if entry.name.is_empty() {
+                    "(unnamed)".to_string()
+                } else if entry.label.is_none() {
+                    entry.name.to_string()
                 } else {
-                    c.name()
+                    // Format as name{label=value}
+                    let (k, v) = entry.label.as_ref().unwrap();
+                    format!("{}{{{}={}}}", entry.name, k, v)
                 };
-                self.format_compact_cell(name, &c.value().to_string())
+                self.format_compact_cell(&name, &entry.value.to_string())
             })
             .collect();
 
@@ -360,16 +367,24 @@ impl TableObserver {
         }
     }
 
-    /// Renders counters in standard mode (two-column table).
+    /// Renders counters in standard mode (three-column table).
     fn render_standard<'a>(&self, counters: impl Iterator<Item = &'a dyn Observable>) -> String {
         let rows: Vec<CounterRow> = counters
-            .map(|c| CounterRow {
-                name: if c.name().is_empty() {
-                    "(unnamed)".to_string()
-                } else {
-                    c.name().to_string()
-                },
-                value: c.value().to_string(),
+            .flat_map(|c| c.expand())
+            .map(|entry| {
+                let labels_str = match &entry.label {
+                    None => String::new(),
+                    Some((k, v)) => format!("{}={}", k, v),
+                };
+                CounterRow {
+                    name: if entry.name.is_empty() {
+                        "(unnamed)".to_string()
+                    } else {
+                        entry.name.to_string()
+                    },
+                    labels: labels_str,
+                    value: entry.value.to_string(),
+                }
             })
             .collect();
 

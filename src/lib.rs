@@ -112,6 +112,37 @@
 //! assert_eq!(requests.value().as_u64(), 0); // Reset to 0!
 //! ```
 //!
+//! ## Labeled Groups
+//!
+//! To track metrics with labels (e.g., HTTP requests by method), use the `labeled_group!` macro:
+//!
+//! ```rust
+//! use contatori::labeled_group;
+//! use contatori::counters::unsigned::Unsigned;
+//! use contatori::counters::Observable;
+//!
+//! labeled_group!(
+//!     HttpRequests,
+//!     "http_requests",
+//!     "method",
+//!     total: Unsigned,
+//!     get: "GET": Unsigned,
+//!     post: "POST": Unsigned,
+//! );
+//!
+//! static HTTP: HttpRequests = HttpRequests::new();
+//!
+//! // Direct field access for incrementing
+//! HTTP.total.add(1);
+//! HTTP.get.add(1);
+//!
+//! // Observers use expand() to get all sub-counters with their labels
+//! // Prometheus output will be:
+//! // http_requests 1          (no label - the total)
+//! // http_requests{method="GET"} 1
+//! // http_requests{method="POST"} 0
+//! ```
+//!
 //! ## Thread Safety
 //!
 //! All counter types are `Send + Sync` and can be safely shared across threads
@@ -148,7 +179,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.5", features = ["table"] }
+//! contatori = { version = "0.6", features = ["table"] }
 //! ```
 //!
 //! ```rust,ignore
@@ -167,7 +198,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.5", features = ["serde_json"] }
+//! contatori = { version = "0.6", features = ["serde_json"] }
 //! ```
 //!
 //! ```rust,ignore
@@ -182,7 +213,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.5", features = ["prometheus"] }
+//! contatori = { version = "0.6", features = ["prometheus"] }
 //! ```
 //!
 //! ```rust,ignore

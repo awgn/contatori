@@ -10,7 +10,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.5", features = ["prometheus"] }
+//! contatori = { version = "0.6", features = ["prometheus"] }
 //! ```
 //!
 //! # How It Works
@@ -77,7 +77,7 @@
 //! let observer = PrometheusObserver::with_registry(registry);
 //! ```
 
-use crate::counters::{CounterValue, MetricKind, Observable};
+use crate::counters::{CounterValue, MetricKind, Observable, ObservableEntry};
 use prometheus::{Encoder, IntCounter, IntGauge, Registry, TextEncoder};
 use std::collections::HashMap;
 use std::fmt;
@@ -343,20 +343,33 @@ impl PrometheusObserver {
         // Create a fresh registry for this render
         let registry = Registry::new();
 
+        // Collect all entries and group them by metric name
+        // This is needed because Prometheus requires all label combinations
+        // for a metric to be registered together
+        let mut entries_by_name: HashMap<String, Vec<ObservableEntry>> = HashMap::new();
+        
         for counter in counters {
-            let raw_name = if counter.name().is_empty() {
-                "unnamed"
-            } else {
-                counter.name()
-            };
+            for entry in counter.expand() {
+                let raw_name = if entry.name.is_empty() {
+                    "unnamed".to_string()
+                } else {
+                    entry.name.to_string()
+                };
+                entries_by_name.entry(raw_name).or_default().push(entry);
+            }
+        }
 
-            let full_name = self.build_full_name(raw_name);
-            let config = self.metric_configs.get(raw_name);
-            // Use explicit config if set, otherwise auto-detect based on metric_kind()
+        // Now process each metric name group
+        for (raw_name, entries) in entries_by_name {
+            let full_name = self.build_full_name(&raw_name);
+            let config = self.metric_configs.get::<str>(&raw_name);
+            
+            // Use the first entry to determine metric type (all should be same)
+            let first_entry = &entries[0];
             let metric_type = config
                 .and_then(|c| c.metric_type)
                 .unwrap_or_else(|| {
-                    match counter.metric_kind() {
+                    match first_entry.metric_kind {
                         MetricKind::Counter => MetricType::Counter,
                         MetricKind::Gauge | MetricKind::Histogram => MetricType::Gauge,
                     }
@@ -365,24 +378,114 @@ impl PrometheusObserver {
                 .and_then(|c| c.help.clone())
                 .unwrap_or_else(|| format!("{} metric", raw_name));
 
-            // Merge const_labels with metric-specific labels and counter labels
-            let mut labels = self.const_labels.clone();
-            if let Some(cfg) = config {
-                labels.extend(cfg.labels.clone());
-            }
-            // Add labels from the counter itself (e.g., from Labeled wrapper)
-            for (k, v) in counter.labels() {
-                labels.insert(k.clone(), v.clone());
-            }
-
-            let value = counter.value();
-
-            match metric_type {
-                MetricType::Counter => {
-                    self.register_counter(&registry, &full_name, &help, &labels, value)?;
+            // Collect all unique label keys across all entries
+            let mut all_label_keys: Vec<String> = Vec::new();
+            
+            // First add const_labels keys
+            for key in self.const_labels.keys() {
+                if !all_label_keys.contains(key) {
+                    all_label_keys.push(key.clone());
                 }
-                MetricType::Gauge => {
-                    self.register_gauge(&registry, &full_name, &help, &labels, value)?;
+            }
+            
+            // Then config labels
+            if let Some(cfg) = config {
+                for key in cfg.labels.keys() {
+                    if !all_label_keys.contains(key) {
+                        all_label_keys.push(key.clone());
+                    }
+                }
+            }
+            
+            // Then entry label
+            for entry in &entries {
+                if let Some((k, _)) = &entry.label {
+                    let key = k.to_string();
+                    if !all_label_keys.contains(&key) {
+                        all_label_keys.push(key);
+                    }
+                }
+            }
+
+            // Sort label keys for consistent ordering
+            all_label_keys.sort();
+
+            if all_label_keys.is_empty() {
+                // No labels - use simple metrics
+                // All entries should have the same value for unlabeled metrics
+                // (or we just use the first one)
+                let value = first_entry.value;
+                match metric_type {
+                    MetricType::Counter => {
+                        self.register_counter(&registry, &full_name, &help, &HashMap::new(), value)?;
+                    }
+                    MetricType::Gauge => {
+                        self.register_gauge(&registry, &full_name, &help, &HashMap::new(), value)?;
+                    }
+                }
+            } else {
+                // Has labels - use Vec metrics
+                let label_names: Vec<&str> = all_label_keys.iter().map(|s| s.as_str()).collect();
+                
+                match metric_type {
+                    MetricType::Counter => {
+                        let counter_vec = prometheus::IntCounterVec::new(
+                            prometheus::Opts::new(&full_name, &help),
+                            &label_names,
+                        )?;
+                        registry.register(Box::new(counter_vec.clone()))?;
+                        
+                        for entry in &entries {
+                            let mut labels_map = self.const_labels.clone();
+                            if let Some(cfg) = config {
+                                labels_map.extend(cfg.labels.clone());
+                            }
+                            if let Some((k, v)) = &entry.label {
+                                labels_map.insert(k.to_string(), v.to_string());
+                            }
+                            
+                            let label_values: Vec<&str> = all_label_keys
+                                .iter()
+                                .map(|k| labels_map.get(k).map(|s| s.as_str()).unwrap_or(""))
+                                .collect();
+                            
+                            let val = match entry.value {
+                                CounterValue::Unsigned(v) => v,
+                                CounterValue::Signed(v) => v.max(0) as u64,
+                                CounterValue::Float(v) => v.max(0.0) as u64,
+                            };
+                            counter_vec.with_label_values(&label_values).inc_by(val);
+                        }
+                    }
+                    MetricType::Gauge => {
+                        let gauge_vec = prometheus::IntGaugeVec::new(
+                            prometheus::Opts::new(&full_name, &help),
+                            &label_names,
+                        )?;
+                        registry.register(Box::new(gauge_vec.clone()))?;
+                        
+                        for entry in &entries {
+                            let mut labels_map = self.const_labels.clone();
+                            if let Some(cfg) = config {
+                                labels_map.extend(cfg.labels.clone());
+                            }
+                            if let Some((k, v)) = &entry.label {
+                                labels_map.insert(k.to_string(), v.to_string());
+                            }
+                            
+                            let label_values: Vec<&str> = all_label_keys
+                                .iter()
+                                .map(|k| labels_map.get(k).map(|s| s.as_str()).unwrap_or(""))
+                                .collect();
+                            
+                            let val = match entry.value {
+                                CounterValue::Unsigned(v) => v as i64,
+                                CounterValue::Signed(v) => v,
+                                CounterValue::Float(v) => v as i64,
+                            };
+                            gauge_vec.with_label_values(&label_values).set(val);
+                        }
+                    }
                 }
             }
         }
@@ -426,6 +529,7 @@ impl PrometheusObserver {
         let val = match value {
             CounterValue::Unsigned(v) => v,
             CounterValue::Signed(v) => v.max(0) as u64, // Counters can't be negative
+            CounterValue::Float(v) => v.max(0.0) as u64,
         };
 
         if labels.is_empty() {
@@ -455,6 +559,7 @@ impl PrometheusObserver {
         let val = match value {
             CounterValue::Unsigned(v) => v as i64,
             CounterValue::Signed(v) => v,
+            CounterValue::Float(v) => v as i64,
         };
 
         if labels.is_empty() {
@@ -749,37 +854,53 @@ mod tests {
     }
 
     #[test]
-    fn test_labeled_counter() {
-        use crate::adapters::Labeled;
+    fn test_labeled_group() {
+        use crate::labeled_group;
 
-        let counter = Labeled::new(Unsigned::new().with_name("http_requests"))
-            .with_label("method", "GET")
-            .with_label("path", "/api/users");
-        counter.add(100);
+        labeled_group!(
+            TestHttpRequests,
+            "http_requests",
+            "method",
+            total: Unsigned,
+            get: "GET": Unsigned,
+            post: "POST": Unsigned,
+        );
+
+        let requests = TestHttpRequests::new();
+        requests.total.add(150);
+        requests.get.add(100);
+        requests.post.add(50);
 
         let observer = PrometheusObserver::new();
-        let counters: Vec<&dyn Observable> = vec![&counter];
+        let counters: Vec<&dyn Observable> = vec![&requests];
         let output = observer.render(counters.into_iter()).unwrap();
 
         // Should contain the metric with labels
         assert!(output.contains("http_requests"));
         assert!(output.contains("method=\"GET\""));
-        assert!(output.contains("path=\"/api/users\""));
+        assert!(output.contains("method=\"POST\""));
         assert!(output.contains("100"));
+        assert!(output.contains("50"));
     }
 
     #[test]
-    fn test_labeled_counter_with_const_labels() {
-        use crate::adapters::Labeled;
+    fn test_labeled_group_with_const_labels() {
+        use crate::labeled_group;
 
-        let counter = Labeled::new(Unsigned::new().with_name("requests"))
-            .with_label("method", "POST");
-        counter.add(50);
+        labeled_group!(
+            TestRequests,
+            "requests",
+            "method",
+            post: "POST": Unsigned,
+        );
+
+        let requests = TestRequests::new();
+        requests.post.add(50);
 
         let observer = PrometheusObserver::new()
             .with_const_label("instance", "server-1");
 
-        let counters: Vec<&dyn Observable> = vec![&counter];
+        let counters: Vec<&dyn Observable> = vec![&requests];
         let output = observer.render(counters.into_iter()).unwrap();
 
         // Should contain both const labels and counter labels
@@ -846,21 +967,33 @@ mod tests {
     }
 
     #[test]
-    fn test_labeled_monotone_preserves_metric_kind() {
-        use crate::adapters::Labeled;
+    fn test_labeled_group_preserves_metric_kind() {
+        use crate::labeled_group;
         use crate::counters::monotone::Monotone;
 
-        // Labeled wrapper should preserve metric_kind from inner counter
-        let labeled_monotone = Labeled::new(Monotone::new().with_name("labeled_monotone"))
-            .with_label("env", "prod");
-        labeled_monotone.add(100);
+        // Labeled group with Monotone counters should preserve metric_kind
+        labeled_group!(
+            TestMonotoneGroup,
+            "labeled_monotone",
+            "env",
+            prod: "prod": Monotone,
+        );
 
-        let labeled_unsigned = Labeled::new(Unsigned::new().with_name("labeled_unsigned"))
-            .with_label("env", "prod");
-        labeled_unsigned.add(200);
+        labeled_group!(
+            TestUnsignedGroup,
+            "labeled_unsigned",
+            "env",
+            prod: "prod": Unsigned,
+        );
+
+        let monotone_group = TestMonotoneGroup::new();
+        monotone_group.prod.add(100);
+
+        let unsigned_group = TestUnsignedGroup::new();
+        unsigned_group.prod.add(200);
 
         let observer = PrometheusObserver::new();
-        let counters: Vec<&dyn Observable> = vec![&labeled_monotone, &labeled_unsigned];
+        let counters: Vec<&dyn Observable> = vec![&monotone_group, &unsigned_group];
         let output = observer.render(counters.into_iter()).unwrap();
 
         // Labeled Monotone should still be detected as counter

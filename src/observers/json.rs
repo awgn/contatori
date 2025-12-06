@@ -9,7 +9,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.5", features = ["json"] }
+//! contatori = { version = "0.6", features = ["json"] }
 //! ```
 //!
 //! # Examples
@@ -128,11 +128,14 @@ impl JsonObserver {
     ///
     /// This is useful when you need the intermediate representation
     /// before serialization.
+    ///
+    /// Uses `expand()` on each counter, so labeled groups will produce
+    /// multiple snapshots.
     pub fn collect<'a>(
         &self,
         counters: impl Iterator<Item = &'a dyn Observable>,
     ) -> Vec<CounterSnapshot> {
-        counters.map(CounterSnapshot::from_observable).collect()
+        counters.flat_map(CounterSnapshot::from_observable).collect()
     }
 
     /// Serializes counters to a JSON string.
@@ -380,10 +383,12 @@ mod tests {
         let snapshot = MetricsSnapshot::new(vec![
             CounterSnapshot {
                 name: "foo".to_string(),
+                label: None,
                 value: CounterValue::Unsigned(1),
             },
             CounterSnapshot {
                 name: "bar".to_string(),
+                label: None,
                 value: CounterValue::Unsigned(2),
             },
         ]);

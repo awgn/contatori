@@ -48,6 +48,7 @@ pub mod signed;
 pub mod unsigned;
 
 use atomic_traits::Atomic;
+use num_traits::Zero;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::{
@@ -120,6 +121,8 @@ pub enum CounterValue {
     Unsigned(u64),
     /// A signed 64-bit counter value.
     Signed(i64),
+    /// An unsigned 64-bit counter value.
+    Float(f64),
 }
 
 impl Display for CounterValue {
@@ -127,6 +130,7 @@ impl Display for CounterValue {
         match self {
             CounterValue::Unsigned(v) => write!(f, "{}", v),
             CounterValue::Signed(v) => write!(f, "{}", v),
+            CounterValue::Float(v) => write!(f, "{}", v),
         }
     }
 }
@@ -148,6 +152,7 @@ impl CounterValue {
         match self {
             CounterValue::Unsigned(v) => *v == 0,
             CounterValue::Signed(v) => *v == 0,
+            CounterValue::Float(v) => v.is_zero(),
         }
     }
 
@@ -165,6 +170,7 @@ impl CounterValue {
         match self {
             CounterValue::Unsigned(v) => *v as i64,
             CounterValue::Signed(v) => *v,
+            CounterValue::Float(v) => *v as i64,
         }
     }
 
@@ -184,6 +190,7 @@ impl CounterValue {
         match self {
             CounterValue::Unsigned(v) => *v,
             CounterValue::Signed(v) => *v as u64,
+            CounterValue::Float(v) => *v as u64,
         }
     }
 
@@ -201,6 +208,7 @@ impl CounterValue {
         match self {
             CounterValue::Unsigned(v) => *v as f64,
             CounterValue::Signed(v) => *v as f64,
+            CounterValue::Float(v) => *v,
         }
     }
 }
@@ -245,6 +253,25 @@ pub enum MetricKind {
     /// Use for values like request latencies, response sizes.
     /// **Not yet supported** - reserved for future use.
     Histogram,
+}
+
+/// Represents a single observable entry with its metadata.
+///
+/// This struct is returned by [`Observable::expand()`] and contains all the
+/// information needed to export a metric: name, labels, value, and kind.
+///
+/// For single counters, `expand()` returns one entry.
+/// For labeled groups, `expand()` returns multiple entries (one per sub-counter).
+#[derive(Debug, Clone)]
+pub struct ObservableEntry {
+    /// The metric name (e.g., "http_requests")
+    pub name: &'static str,
+    /// Optional label as (key, value) pair (e.g., ("method", "GET"))
+    pub label: Option<(&'static str, &'static str)>,
+    /// The counter value
+    pub value: CounterValue,
+    /// The kind of metric (Counter, Gauge, etc.)
+    pub metric_kind: MetricKind,
 }
 
 /// A trait for types that can be observed to retrieve their current value.
@@ -293,7 +320,7 @@ pub trait Observable: Debug {
     /// The name is typically a static string set at counter creation time
     /// using the `with_name()` builder method. Returns an empty string if
     /// no name was set.
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
 
     /// Returns the kind of metric this counter represents.
     ///
@@ -340,14 +367,14 @@ pub trait Observable: Debug {
     /// trade-off for counters where writes vastly outnumber reads.
     fn value(&self) -> CounterValue;
 
-    /// Returns the labels associated with this counter.
+    /// Expands this observable into one or more entries.
     ///
-    /// Labels are key-value pairs that provide additional dimensions
-    /// for the metric, useful for systems like Prometheus.
+    /// This is the primary method used by observers to collect metrics.
+    /// 
+    /// - For single counters: returns one entry with this counter's data
+    /// - For labeled groups: returns one entry per sub-counter
     ///
-    /// The default implementation returns an empty slice. Counters
-    /// wrapped with [`Labeled`](crate::adapters::Labeled) will return
-    /// their configured labels.
+    /// The default implementation returns a single entry for `self`.
     ///
     /// # Example
     ///
@@ -355,11 +382,21 @@ pub trait Observable: Debug {
     /// use contatori::counters::Observable;
     /// use contatori::counters::unsigned::Unsigned;
     ///
-    /// let counter = Unsigned::new();
-    /// assert!(counter.labels().is_empty());
+    /// let counter = Unsigned::new().with_name("requests");
+    /// counter.add(100);
+    ///
+    /// let entries = counter.expand();
+    /// assert_eq!(entries.len(), 1);
+    /// assert_eq!(entries[0].name, "requests");
+    /// assert_eq!(entries[0].value.as_u64(), 100);
     /// ```
-    fn labels(&self) -> &[(String, String)] {
-        &[]
+    fn expand(&self) -> Vec<ObservableEntry> {
+        vec![ObservableEntry {
+            name: self.name(),
+            label: None,
+            value: self.value(),
+            metric_kind: self.metric_kind(),
+        }]
     }
 }
 
