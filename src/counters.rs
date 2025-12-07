@@ -44,6 +44,7 @@ pub mod average;
 pub mod maximum;
 pub mod minimum;
 pub mod monotone;
+pub mod rate;
 pub mod signed;
 pub mod unsigned;
 
