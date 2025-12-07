@@ -57,11 +57,7 @@
 //! ```
 
 use crate::counters::Observable;
-use tabled::{
-    builder::Builder,
-    settings::Style,
-    Table, Tabled,
-};
+use tabled::{builder::Builder, settings::Style, Table, Tabled};
 
 /// Available table styles for rendering.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -305,16 +301,36 @@ impl TableObserver {
     /// Applies the configured style to a table.
     fn apply_style(&self, table: &mut Table) {
         match self.config.style {
-            TableStyle::Ascii => { table.with(Style::ascii()); }
-            TableStyle::Rounded => { table.with(Style::rounded()); }
-            TableStyle::Sharp => { table.with(Style::sharp()); }
-            TableStyle::Modern => { table.with(Style::modern()); }
-            TableStyle::Extended => { table.with(Style::extended()); }
-            TableStyle::Markdown => { table.with(Style::markdown()); }
-            TableStyle::ReStructuredText => { table.with(Style::re_structured_text()); }
-            TableStyle::Dots => { table.with(Style::dots()); }
-            TableStyle::Blank => { table.with(Style::blank()); }
-            TableStyle::Double => { table.with(Style::ascii()); } // Fallback
+            TableStyle::Ascii => {
+                table.with(Style::ascii());
+            }
+            TableStyle::Rounded => {
+                table.with(Style::rounded());
+            }
+            TableStyle::Sharp => {
+                table.with(Style::sharp());
+            }
+            TableStyle::Modern => {
+                table.with(Style::modern());
+            }
+            TableStyle::Extended => {
+                table.with(Style::extended());
+            }
+            TableStyle::Markdown => {
+                table.with(Style::markdown());
+            }
+            TableStyle::ReStructuredText => {
+                table.with(Style::re_structured_text());
+            }
+            TableStyle::Dots => {
+                table.with(Style::dots());
+            }
+            TableStyle::Blank => {
+                table.with(Style::blank());
+            }
+            TableStyle::Double => {
+                table.with(Style::ascii());
+            } // Fallback
         }
     }
 
@@ -392,7 +408,9 @@ impl TableObserver {
         self.apply_style(&mut table);
 
         if !self.config.show_header {
-            table.with(tabled::settings::Remove::row(tabled::settings::object::Rows::first()));
+            table.with(tabled::settings::Remove::row(
+                tabled::settings::object::Rows::first(),
+            ));
         }
 
         if let Some(ref title) = self.config.title {
@@ -443,17 +461,16 @@ impl TableObserver {
             self.render_standard(counters)
         }
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::counters::unsigned::Unsigned;
-    use crate::counters::signed::Signed;
-    use crate::counters::minimum::Minimum;
-    use crate::counters::maximum::Maximum;
     use crate::counters::average::Average;
+    use crate::counters::maximum::Maximum;
+    use crate::counters::minimum::Minimum;
+    use crate::counters::signed::Signed;
+    use crate::counters::unsigned::Unsigned;
 
     #[test]
     fn test_render_empty() {
@@ -529,15 +546,21 @@ mod tests {
         let counters: Vec<&dyn Observable> = vec![&counter];
 
         // Test different separators
-        let observer = TableObserver::new().compact(true).separator(CompactSeparator::Equals);
+        let observer = TableObserver::new()
+            .compact(true)
+            .separator(CompactSeparator::Equals);
         let output = observer.render(counters.iter().copied());
         assert!(output.contains("test = 42"));
 
-        let observer = TableObserver::new().compact(true).separator(CompactSeparator::Arrow);
+        let observer = TableObserver::new()
+            .compact(true)
+            .separator(CompactSeparator::Arrow);
         let output = observer.render(counters.iter().copied());
         assert!(output.contains("test → 42"));
 
-        let observer = TableObserver::new().compact(true).separator(CompactSeparator::Pipe);
+        let observer = TableObserver::new()
+            .compact(true)
+            .separator(CompactSeparator::Pipe);
         let output = observer.render(counters.iter().copied());
         assert!(output.contains("test | 42"));
     }
@@ -594,11 +617,7 @@ mod tests {
 
         let counters: Vec<&dyn Observable> = vec![&counter];
 
-        let styles = [
-            TableStyle::Ascii,
-            TableStyle::Rounded,
-            TableStyle::Sharp,
-        ];
+        let styles = [TableStyle::Ascii, TableStyle::Rounded, TableStyle::Sharp];
 
         for style in styles {
             let observer = TableObserver::new()
@@ -694,13 +713,7 @@ mod tests {
         average.observe(100);
         average.observe(200);
 
-        let counters: Vec<&dyn Observable> = vec![
-            &unsigned,
-            &signed,
-            &minimum,
-            &maximum,
-            &average,
-        ];
+        let counters: Vec<&dyn Observable> = vec![&unsigned, &signed, &minimum, &maximum, &average];
 
         let observer = TableObserver::new().with_style(TableStyle::Rounded);
         let output = observer.render(counters.into_iter());
@@ -731,13 +744,7 @@ mod tests {
         maximum.observe(200);
         average.observe(150);
 
-        let counters: Vec<&dyn Observable> = vec![
-            &unsigned,
-            &signed,
-            &minimum,
-            &maximum,
-            &average,
-        ];
+        let counters: Vec<&dyn Observable> = vec![&unsigned, &signed, &minimum, &maximum, &average];
 
         let observer = TableObserver::new()
             .compact(true)
@@ -791,7 +798,12 @@ mod tests {
         assert!(output.contains("a: 1"));
         assert!(output.contains("b: 2"));
         // The third column should have "-" as placeholder
-        assert!(output.contains("-") || output.lines().any(|l| l.contains("│ - │") || l.contains("│  │")));
+        assert!(
+            output.contains("-")
+                || output
+                    .lines()
+                    .any(|l| l.contains("│ - │") || l.contains("│  │"))
+        );
     }
 
     #[test]

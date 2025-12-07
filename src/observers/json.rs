@@ -135,7 +135,9 @@ impl JsonObserver {
         &self,
         counters: impl Iterator<Item = &'a dyn Observable>,
     ) -> Vec<CounterSnapshot> {
-        counters.flat_map(CounterSnapshot::from_observable).collect()
+        counters
+            .flat_map(CounterSnapshot::from_observable)
+            .collect()
     }
 
     /// Serializes counters to a JSON string.
@@ -346,8 +348,7 @@ mod tests {
         average.observe(100);
         average.observe(200);
 
-        let counters: Vec<&dyn Observable> =
-            vec![&unsigned, &signed, &minimum, &maximum, &average];
+        let counters: Vec<&dyn Observable> = vec![&unsigned, &signed, &minimum, &maximum, &average];
 
         let observer = JsonObserver::new();
         let json = observer.to_json(counters.into_iter()).unwrap();

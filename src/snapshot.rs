@@ -104,9 +104,7 @@ impl CounterSnapshot {
                 } else {
                     entry.name.to_string()
                 },
-                label: entry
-                    .label
-                    .map(|(k, v)| (k.to_string(), v.to_string())),
+                label: entry.label.map(|(k, v)| (k.to_string(), v.to_string())),
                 value: entry.value,
             })
             .collect()
@@ -212,7 +210,10 @@ mod tests {
         );
         assert_eq!(snapshot.name, "test");
         assert!(snapshot.label.is_some());
-        assert_eq!(snapshot.label.unwrap(), ("method".to_string(), "GET".to_string()));
+        assert_eq!(
+            snapshot.label.unwrap(),
+            ("method".to_string(), "GET".to_string())
+        );
         assert_eq!(snapshot.value, CounterValue::Unsigned(42));
     }
 
@@ -282,8 +283,14 @@ mod tests {
         let snapshot = MetricsSnapshot::collect(counters.into_iter());
 
         assert_eq!(snapshot.counters.len(), 2);
-        assert_eq!(snapshot.get("c1").unwrap().value, CounterValue::Unsigned(10));
-        assert_eq!(snapshot.get("c2").unwrap().value, CounterValue::Unsigned(20));
+        assert_eq!(
+            snapshot.get("c1").unwrap().value,
+            CounterValue::Unsigned(10)
+        );
+        assert_eq!(
+            snapshot.get("c2").unwrap().value,
+            CounterValue::Unsigned(20)
+        );
     }
 
     #[test]
@@ -309,9 +316,13 @@ mod tests {
 
         // Should have 3 entries: total (no label), a (label=A), b (label=B)
         assert_eq!(snapshot.counters.len(), 3);
-        
+
         // Check that labels are preserved
-        let with_labels: Vec<_> = snapshot.counters.iter().filter(|c| c.label.is_some()).collect();
+        let with_labels: Vec<_> = snapshot
+            .counters
+            .iter()
+            .filter(|c| c.label.is_some())
+            .collect();
         assert_eq!(with_labels.len(), 2);
     }
 

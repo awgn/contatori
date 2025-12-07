@@ -78,7 +78,7 @@
 //! ```
 
 use crate::counters::{CounterValue, MetricKind, Observable, ObservableEntry};
-use prometheus::{Encoder, IntCounter, IntGauge, Registry, TextEncoder};
+use prometheus::{Encoder, Gauge, IntCounter, IntGauge, Registry, TextEncoder};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -347,7 +347,7 @@ impl PrometheusObserver {
         // This is needed because Prometheus requires all label combinations
         // for a metric to be registered together
         let mut entries_by_name: HashMap<String, Vec<ObservableEntry>> = HashMap::new();
-        
+
         for counter in counters {
             for entry in counter.expand() {
                 let raw_name = if entry.name.is_empty() {
@@ -363,12 +363,11 @@ impl PrometheusObserver {
         for (raw_name, entries) in entries_by_name {
             let full_name = self.build_full_name(&raw_name);
             let config = self.metric_configs.get::<str>(&raw_name);
-            
+
             // Use the first entry to determine metric type (all should be same)
             let first_entry = &entries[0];
-            let metric_type = config
-                .and_then(|c| c.metric_type)
-                .unwrap_or_else(|| {
+            let metric_type =
+                config.and_then(|c| c.metric_type).unwrap_or_else(|| {
                     match first_entry.metric_kind {
                         MetricKind::Counter => MetricType::Counter,
                         MetricKind::Gauge | MetricKind::Histogram => MetricType::Gauge,
@@ -380,14 +379,14 @@ impl PrometheusObserver {
 
             // Collect all unique label keys across all entries
             let mut all_label_keys: Vec<String> = Vec::new();
-            
+
             // First add const_labels keys
             for key in self.const_labels.keys() {
                 if !all_label_keys.contains(key) {
                     all_label_keys.push(key.clone());
                 }
             }
-            
+
             // Then config labels
             if let Some(cfg) = config {
                 for key in cfg.labels.keys() {
@@ -396,7 +395,7 @@ impl PrometheusObserver {
                     }
                 }
             }
-            
+
             // Then entry label
             for entry in &entries {
                 if let Some((k, _)) = &entry.label {
@@ -417,7 +416,13 @@ impl PrometheusObserver {
                 let value = first_entry.value;
                 match metric_type {
                     MetricType::Counter => {
-                        self.register_counter(&registry, &full_name, &help, &HashMap::new(), value)?;
+                        self.register_counter(
+                            &registry,
+                            &full_name,
+                            &help,
+                            &HashMap::new(),
+                            value,
+                        )?;
                     }
                     MetricType::Gauge => {
                         self.register_gauge(&registry, &full_name, &help, &HashMap::new(), value)?;
@@ -426,7 +431,7 @@ impl PrometheusObserver {
             } else {
                 // Has labels - use Vec metrics
                 let label_names: Vec<&str> = all_label_keys.iter().map(|s| s.as_str()).collect();
-                
+
                 match metric_type {
                     MetricType::Counter => {
                         let counter_vec = prometheus::IntCounterVec::new(
@@ -434,7 +439,7 @@ impl PrometheusObserver {
                             &label_names,
                         )?;
                         registry.register(Box::new(counter_vec.clone()))?;
-                        
+
                         for entry in &entries {
                             let mut labels_map = self.const_labels.clone();
                             if let Some(cfg) = config {
@@ -443,12 +448,12 @@ impl PrometheusObserver {
                             if let Some((k, v)) = &entry.label {
                                 labels_map.insert(k.to_string(), v.to_string());
                             }
-                            
+
                             let label_values: Vec<&str> = all_label_keys
                                 .iter()
                                 .map(|k| labels_map.get(k).map(|s| s.as_str()).unwrap_or(""))
                                 .collect();
-                            
+
                             let val = match entry.value {
                                 CounterValue::Unsigned(v) => v,
                                 CounterValue::Signed(v) => v.max(0) as u64,
@@ -458,32 +463,66 @@ impl PrometheusObserver {
                         }
                     }
                     MetricType::Gauge => {
-                        let gauge_vec = prometheus::IntGaugeVec::new(
-                            prometheus::Opts::new(&full_name, &help),
-                            &label_names,
-                        )?;
-                        registry.register(Box::new(gauge_vec.clone()))?;
-                        
-                        for entry in &entries {
-                            let mut labels_map = self.const_labels.clone();
-                            if let Some(cfg) = config {
-                                labels_map.extend(cfg.labels.clone());
+                        // Check if any entry has a Float value
+                        let has_float = entries
+                            .iter()
+                            .any(|e| matches!(e.value, CounterValue::Float(_)));
+
+                        if has_float {
+                            // Use float GaugeVec for float values
+                            let gauge_vec = prometheus::GaugeVec::new(
+                                prometheus::Opts::new(&full_name, &help),
+                                &label_names,
+                            )?;
+                            registry.register(Box::new(gauge_vec.clone()))?;
+
+                            for entry in &entries {
+                                let mut labels_map = self.const_labels.clone();
+                                if let Some(cfg) = config {
+                                    labels_map.extend(cfg.labels.clone());
+                                }
+                                if let Some((k, v)) = &entry.label {
+                                    labels_map.insert(k.to_string(), v.to_string());
+                                }
+
+                                let label_values: Vec<&str> = all_label_keys
+                                    .iter()
+                                    .map(|k| labels_map.get(k).map(|s| s.as_str()).unwrap_or(""))
+                                    .collect();
+
+                                gauge_vec
+                                    .with_label_values(&label_values)
+                                    .set(entry.value.as_f64());
                             }
-                            if let Some((k, v)) = &entry.label {
-                                labels_map.insert(k.to_string(), v.to_string());
+                        } else {
+                            // Use IntGaugeVec for integer values
+                            let gauge_vec = prometheus::IntGaugeVec::new(
+                                prometheus::Opts::new(&full_name, &help),
+                                &label_names,
+                            )?;
+                            registry.register(Box::new(gauge_vec.clone()))?;
+
+                            for entry in &entries {
+                                let mut labels_map = self.const_labels.clone();
+                                if let Some(cfg) = config {
+                                    labels_map.extend(cfg.labels.clone());
+                                }
+                                if let Some((k, v)) = &entry.label {
+                                    labels_map.insert(k.to_string(), v.to_string());
+                                }
+
+                                let label_values: Vec<&str> = all_label_keys
+                                    .iter()
+                                    .map(|k| labels_map.get(k).map(|s| s.as_str()).unwrap_or(""))
+                                    .collect();
+
+                                let val = match entry.value {
+                                    CounterValue::Unsigned(v) => v as i64,
+                                    CounterValue::Signed(v) => v,
+                                    CounterValue::Float(_) => unreachable!(),
+                                };
+                                gauge_vec.with_label_values(&label_values).set(val);
                             }
-                            
-                            let label_values: Vec<&str> = all_label_keys
-                                .iter()
-                                .map(|k| labels_map.get(k).map(|s| s.as_str()).unwrap_or(""))
-                                .collect();
-                            
-                            let val = match entry.value {
-                                CounterValue::Unsigned(v) => v as i64,
-                                CounterValue::Signed(v) => v,
-                                CounterValue::Float(v) => v as i64,
-                            };
-                            gauge_vec.with_label_values(&label_values).set(val);
                         }
                     }
                 }
@@ -548,6 +587,8 @@ impl PrometheusObserver {
     }
 
     /// Registers a gauge metric with the given value.
+    ///
+    /// Uses float `Gauge` for `CounterValue::Float`, and `IntGauge` for integer types.
     fn register_gauge(
         &self,
         registry: &Registry,
@@ -556,23 +597,44 @@ impl PrometheusObserver {
         labels: &HashMap<String, String>,
         value: CounterValue,
     ) -> Result<()> {
-        let val = match value {
-            CounterValue::Unsigned(v) => v as i64,
-            CounterValue::Signed(v) => v,
-            CounterValue::Float(v) => v as i64,
-        };
+        // Use float gauge for Float values, int gauge otherwise
+        match value {
+            CounterValue::Float(v) => {
+                if labels.is_empty() {
+                    let gauge = Gauge::new(name, help)?;
+                    gauge.set(v);
+                    registry.register(Box::new(gauge))?;
+                } else {
+                    let label_names: Vec<&str> = labels.keys().map(|s| s.as_str()).collect();
+                    let gauge =
+                        prometheus::GaugeVec::new(prometheus::Opts::new(name, help), &label_names)?;
+                    let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+                    gauge.with_label_values(&label_values).set(v);
+                    registry.register(Box::new(gauge))?;
+                }
+            }
+            _ => {
+                let val = match value {
+                    CounterValue::Unsigned(v) => v as i64,
+                    CounterValue::Signed(v) => v,
+                    CounterValue::Float(_) => unreachable!(),
+                };
 
-        if labels.is_empty() {
-            let gauge = IntGauge::new(name, help)?;
-            gauge.set(val);
-            registry.register(Box::new(gauge))?;
-        } else {
-            let label_names: Vec<&str> = labels.keys().map(|s| s.as_str()).collect();
-            let gauge =
-                prometheus::IntGaugeVec::new(prometheus::Opts::new(name, help), &label_names)?;
-            let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
-            gauge.with_label_values(&label_values).set(val);
-            registry.register(Box::new(gauge))?;
+                if labels.is_empty() {
+                    let gauge = IntGauge::new(name, help)?;
+                    gauge.set(val);
+                    registry.register(Box::new(gauge))?;
+                } else {
+                    let label_names: Vec<&str> = labels.keys().map(|s| s.as_str()).collect();
+                    let gauge = prometheus::IntGaugeVec::new(
+                        prometheus::Opts::new(name, help),
+                        &label_names,
+                    )?;
+                    let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+                    gauge.with_label_values(&label_values).set(val);
+                    registry.register(Box::new(gauge))?;
+                }
+            }
         }
         Ok(())
     }
@@ -682,8 +744,7 @@ mod tests {
         let counter = Unsigned::new().with_name("requests");
         counter.add(100);
 
-        let observer =
-            PrometheusObserver::new().with_const_label("instance", "localhost:8080");
+        let observer = PrometheusObserver::new().with_const_label("instance", "localhost:8080");
         let counters: Vec<&dyn Observable> = vec![&counter];
         let output = observer.render(counters.into_iter()).unwrap();
 
@@ -708,20 +769,14 @@ mod tests {
             PrometheusObserver::sanitize_name("valid_name"),
             "valid_name"
         );
-        assert_eq!(
-            PrometheusObserver::sanitize_name("with-dash"),
-            "with_dash"
-        );
+        assert_eq!(PrometheusObserver::sanitize_name("with-dash"), "with_dash");
         assert_eq!(PrometheusObserver::sanitize_name("with.dot"), "with_dot");
         assert_eq!(
             PrometheusObserver::sanitize_name("with space"),
             "with_space"
         );
         assert_eq!(PrometheusObserver::sanitize_name(""), "unnamed");
-        assert_eq!(
-            PrometheusObserver::sanitize_name("123starts"),
-            "_123starts"
-        );
+        assert_eq!(PrometheusObserver::sanitize_name("123starts"), "_123starts");
     }
 
     #[test]
@@ -751,8 +806,7 @@ mod tests {
         average.observe(100);
         average.observe(200);
 
-        let counters: Vec<&dyn Observable> =
-            vec![&unsigned, &signed, &minimum, &maximum, &average];
+        let counters: Vec<&dyn Observable> = vec![&unsigned, &signed, &minimum, &maximum, &average];
 
         let observer = PrometheusObserver::new()
             .with_type("unsigned_metric", MetricType::Counter)
@@ -897,8 +951,7 @@ mod tests {
         let requests = TestRequests::new();
         requests.post.add(50);
 
-        let observer = PrometheusObserver::new()
-            .with_const_label("instance", "server-1");
+        let observer = PrometheusObserver::new().with_const_label("instance", "server-1");
 
         let counters: Vec<&dyn Observable> = vec![&requests];
         let output = observer.render(counters.into_iter()).unwrap();
@@ -968,8 +1021,8 @@ mod tests {
 
     #[test]
     fn test_labeled_group_preserves_metric_kind() {
-        use crate::labeled_group;
         use crate::counters::monotone::Monotone;
+        use crate::labeled_group;
 
         // Labeled group with Monotone counters should preserve metric_kind
         labeled_group!(
@@ -1009,12 +1062,10 @@ mod tests {
         use crate::counters::monotone::Monotone;
 
         // Resettable wrapper should preserve metric_kind from inner counter
-        let resettable_monotone =
-            Resettable::new(Monotone::new().with_name("r_monotone"));
+        let resettable_monotone = Resettable::new(Monotone::new().with_name("r_monotone"));
         resettable_monotone.add(100);
 
-        let resettable_unsigned =
-            Resettable::new(Unsigned::new().with_name("r_unsigned"));
+        let resettable_unsigned = Resettable::new(Unsigned::new().with_name("r_unsigned"));
         resettable_unsigned.add(200);
 
         let observer = PrometheusObserver::new();
@@ -1026,5 +1077,48 @@ mod tests {
 
         // Resettable Unsigned should still be detected as gauge
         assert!(output.contains("# TYPE r_unsigned gauge"));
+    }
+
+    #[test]
+    fn test_rate_counter_float_gauge() {
+        use crate::counters::rate::Rate;
+        use std::thread;
+        use std::time::Duration;
+
+        let rate_counter = Rate::new().with_name("request_rate");
+
+        // Initialize rate calculation (first call returns 0.0)
+        let _ = rate_counter.rate();
+
+        // Add some values and wait
+        rate_counter.add(1000);
+        thread::sleep(Duration::from_millis(50));
+
+        let observer = PrometheusObserver::new();
+        let counters: Vec<&dyn Observable> = vec![&rate_counter];
+        let output = observer.render(counters.into_iter()).unwrap();
+
+        // Rate counter should be a gauge (rates can go up or down)
+        assert!(output.contains("# TYPE request_rate gauge"));
+        // Value should be a float (rate calculation)
+        assert!(output.contains("request_rate"));
+    }
+
+    #[test]
+    fn test_float_value_precision() {
+        use crate::counters::rate::Rate;
+
+        let rate_counter = Rate::new().with_name("float_metric");
+
+        // First call establishes baseline
+        let _ = rate_counter.rate();
+
+        let observer = PrometheusObserver::new();
+        let counters: Vec<&dyn Observable> = vec![&rate_counter];
+        let output = observer.render(counters.into_iter()).unwrap();
+
+        // Should render as gauge with float value (0 in this case)
+        assert!(output.contains("# TYPE float_metric gauge"));
+        assert!(output.contains("float_metric 0"));
     }
 }
