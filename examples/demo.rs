@@ -143,14 +143,7 @@ struct Args {
 }
 
 /// Creates sample counters with initial values.
-fn create_counters() -> (
-    Unsigned,
-    Unsigned,
-    Signed,
-    Minimum,
-    Maximum,
-    Average,
-) {
+fn create_counters() -> (Unsigned, Unsigned, Signed, Minimum, Maximum, Average) {
     let requests = Unsigned::new().with_name("http_requests_total");
     let errors = Unsigned::new().with_name("http_errors_total");
     let connections = Signed::new().with_name("active_connections");
@@ -168,7 +161,14 @@ fn create_counters() -> (
     avg_latency.observe(67);
     avg_latency.observe(89);
 
-    (requests, errors, connections, min_latency, max_latency, avg_latency)
+    (
+        requests,
+        errors,
+        connections,
+        min_latency,
+        max_latency,
+        avg_latency,
+    )
 }
 
 /// Simulates concurrent counter updates.
@@ -259,7 +259,8 @@ fn render_output(args: &Args, counters: Vec<&dyn Observable>) -> String {
                 .wrap_in_snapshot(args.timestamp)
                 .include_timestamp(args.timestamp);
 
-            observer.to_json(counters.into_iter())
+            observer
+                .to_json(counters.into_iter())
                 .unwrap_or_else(|e| format!("Error: {}", e))
         }
 
@@ -275,15 +276,25 @@ fn render_output(args: &Args, counters: Vec<&dyn Observable>) -> String {
                 .with_help("http_requests_total", "Total number of HTTP requests")
                 .with_help("http_errors_total", "Total number of HTTP errors")
                 .with_help("active_connections", "Number of active connections")
-                .with_help("request_latency_min_ms", "Minimum request latency in milliseconds")
-                .with_help("request_latency_max_ms", "Maximum request latency in milliseconds")
-                .with_help("request_latency_avg_ms", "Average request latency in milliseconds");
+                .with_help(
+                    "request_latency_min_ms",
+                    "Minimum request latency in milliseconds",
+                )
+                .with_help(
+                    "request_latency_max_ms",
+                    "Maximum request latency in milliseconds",
+                )
+                .with_help(
+                    "request_latency_avg_ms",
+                    "Average request latency in milliseconds",
+                );
 
             if let Some(ref instance) = args.instance {
                 observer = observer.with_const_label("instance", instance);
             }
 
-            observer.render(counters.into_iter())
+            observer
+                .render(counters.into_iter())
                 .unwrap_or_else(|e| format!("Error: {}", e))
         }
     }

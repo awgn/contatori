@@ -371,7 +371,7 @@ pub trait Observable: Debug {
     /// Expands this observable into one or more entries.
     ///
     /// This is the primary method used by observers to collect metrics.
-    /// 
+    ///
     /// - For single counters: returns one entry with this counter's data
     /// - For labeled groups: returns one entry per sub-counter
     ///

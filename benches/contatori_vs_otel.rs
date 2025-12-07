@@ -1,8 +1,8 @@
-//! Benchmark comparing `labeled_group!` counters with OpenTelemetry counters.
+//! Benchmark comparing contatori counters with OpenTelemetry counters.
 //!
 //! This benchmark measures the performance difference between:
-//! 1. Contatori's `labeled_group!` macro (sharded, static counters)
-//! 2. OpenTelemetry's Counter with attributes (dynamic, SDK-based)
+//! 1. Contatori's sharded counters (Monotone, labeled_group!)
+//! 2. OpenTelemetry's Counter (with and without attributes)
 //!
 //! Run with:
 //! ```bash
@@ -12,6 +12,7 @@
 use std::sync::Arc;
 use std::thread;
 
+use contatori::counters::monotone::Monotone;
 use contatori::counters::unsigned::Unsigned;
 use contatori::counters::Observable;
 use contatori::labeled_group;
@@ -213,5 +214,81 @@ fn bench_single_label_high_contention(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_labeled_group, bench_single_label_high_contention);
+/// Benchmark comparing simple counters without labels.
+/// Direct comparison between contatori::Monotone and OpenTelemetry Counter.
+fn bench_simple_counter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("simple_counter");
+
+    // Benchmark contatori Monotone counter (no labels)
+    group.bench_function(
+        BenchmarkId::new(
+            "contatori Monotone",
+            format!("{}threads x {}iter", NUM_THREADS, ITERATIONS_PER_THREAD),
+        ),
+        |b| {
+            b.iter(|| {
+                let counter = Arc::new(Monotone::new());
+                let mut handles = vec![];
+
+                for _ in 0..NUM_THREADS {
+                    let c = Arc::clone(&counter);
+                    let handle = thread::spawn(move || {
+                        for _ in 0..ITERATIONS_PER_THREAD {
+                            c.add(1);
+                        }
+                    });
+                    handles.push(handle);
+                }
+
+                for handle in handles {
+                    handle.join().unwrap();
+                }
+
+                black_box(counter.value())
+            })
+        },
+    );
+
+    // Benchmark OpenTelemetry counter without attributes
+    group.bench_function(
+        BenchmarkId::new(
+            "OpenTelemetry Counter",
+            format!("{}threads x {}iter", NUM_THREADS, ITERATIONS_PER_THREAD),
+        ),
+        |b| {
+            let counter = setup_opentelemetry();
+
+            b.iter(|| {
+                let counter = counter.clone();
+                let mut handles = vec![];
+
+                for _ in 0..NUM_THREADS {
+                    let counter = counter.clone();
+                    let handle = thread::spawn(move || {
+                        // No attributes - simplest possible usage
+                        for _ in 0..ITERATIONS_PER_THREAD {
+                            counter.add(1, &[]);
+                        }
+                    });
+                    handles.push(handle);
+                }
+
+                for handle in handles {
+                    handle.join().unwrap();
+                }
+
+                black_box(())
+            })
+        },
+    );
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_simple_counter,
+    bench_labeled_group,
+    bench_single_label_high_contention
+);
 criterion_main!(benches);

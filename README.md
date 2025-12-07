@@ -49,38 +49,48 @@ Benchmarked on **Apple M2** (8 cores) with **8 threads**, each performing **1,00
 
 The sharded counter is **~72x faster** than a naive atomic counter under high contention. This difference grows with more threads and higher contention.
 
-### Labeled Counters: Contatori vs OpenTelemetry
+### Contatori vs OpenTelemetry
 
-Benchmarked on **Apple M2** (8 cores) with **8 threads**, each performing **100,000 increments** with labeled counters (HTTP methods: GET/POST/PUT/DELETE):
+Benchmarked on **Apple M2** (8 cores) with **8 threads**, each performing **100,000 increments**:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│              Labeled Counter Performance: Contatori vs OpenTelemetry        │
+│              Counter Performance: Contatori vs OpenTelemetry                │
 │                        (8 threads × 100,000 iterations)                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  Distributed labels (rotating GET/POST/PUT/DELETE):                         │
+│  Simple counter (no labels):                                                │
 │                                                                             │
-│  OpenTelemetry Counter  ████████████████████████████████████████  338.83 ms │
+│  OpenTelemetry Counter  ████████████████████████████████████████   25.81 ms │
+│                                                                             │
+│  contatori Monotone                                                0.33 ms  │
+│                                                                             │
+│  Speedup: 79x faster                                                        │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Labeled counters (rotating GET/POST/PUT/DELETE):                           │
+│                                                                             │
+│  OpenTelemetry Counter  ████████████████████████████████████████  356.46 ms │
 │                                                                             │
 │  contatori labeled_group!                                          0.21 ms  │
 │                                                                             │
-│  Speedup: 1582x faster                                                      │
+│  Speedup: 1665x faster                                                      │
 │                                                                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  High contention (all threads same label):                                  │
 │                                                                             │
-│  OpenTelemetry Counter  ████████████████████████████████████████  341.91 ms │
+│  OpenTelemetry Counter  ████████████████████████████████████████  350.45 ms │
 │                                                                             │
 │  contatori labeled_group!                                          0.32 ms  │
 │                                                                             │
-│  Speedup: 1056x faster                                                      │
+│  Speedup: 1093x faster                                                      │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The `labeled_group!` counter is **~1000-1500x faster** than OpenTelemetry counters for high-throughput labeled metrics. This massive difference comes from:
+Contatori is **79x to 1665x faster** than OpenTelemetry counters depending on usage pattern. This massive difference comes from:
 - **Zero runtime overhead**: Labels are resolved at compile time
 - **Sharded storage**: Each sub-counter uses the same sharding strategy
 - **No dynamic dispatch**: Direct field access instead of hash lookups
@@ -95,6 +105,7 @@ The `labeled_group!` counter is **~1000-1500x faster** than OpenTelemetry counte
 | `Minimum` | Tracks minimum observed value | Latency minimums | `Gauge` |
 | `Maximum` | Tracks maximum observed value | Latency maximums, peak values | `Gauge` |
 | `Average` | Computes running average | Average latency, mean values | `Gauge` |
+| `Rate` | Calculates rate of change (units/second) | Request rates, throughput | `Gauge` |
 
 ## Quick Start
 
@@ -490,6 +501,44 @@ total.add(100);
 assert_eq!(total.value().as_u64(), 100);
 assert_eq!(total.value().as_u64(), 100); // Still 100!
 ```
+
+### Rate Counter
+
+The `Rate` counter calculates the rate of change (units per second) over time. It's useful for tracking throughput, request rates, or any metric where you need to know "how fast" something is happening.
+
+```rust
+use contatori::counters::rate::Rate;
+use contatori::counters::Observable;
+use std::thread;
+use std::time::Duration;
+
+// Can be used as a static
+static REQUESTS: Rate = Rate::new().with_name("requests_per_sec");
+
+// Increment like a normal counter
+REQUESTS.add(1);
+REQUESTS.add(5);
+
+// Get the absolute count
+println!("Total: {}", REQUESTS.total_value()); // 6
+
+// Get the rate (units per second)
+// First call returns 0.0 and establishes baseline
+let rate1 = REQUESTS.rate(); // 0.0
+
+// Add more and wait
+REQUESTS.add(1000);
+thread::sleep(Duration::from_secs(1));
+
+// Now rate() returns actual rate
+let rate2 = REQUESTS.rate(); // ~1000.0 per second
+```
+
+The `Rate` counter:
+- Uses sharded storage like all other counters (high performance)
+- Can be initialized in `const` context (`static RATE: Rate = Rate::new()`)
+- Returns `MetricKind::Gauge` (rates can go up or down)
+- Exports as float values in Prometheus
 
 ### Labeled Group
 

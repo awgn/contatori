@@ -1,6 +1,6 @@
 [package]
 name = "contatori"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 authors = ["Nicola Bonelli <nicola.bonelli@gmail.com>"]
 description = "High-performance sharded atomic counters for Rust"
@@ -40,11 +40,11 @@ opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [[bench]]
-name = "counter_benchmark"
+name = "contatori_vs_atomic"
 harness = false
 
 [[bench]]
-name = "labeled_group_benchmark"
+name = "contatori_vs_otel"
 harness = false
 
 [[example]]
