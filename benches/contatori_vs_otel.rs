@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::thread;
 
 use contatori::counters::monotone::Monotone;
-use contatori::counters::unsigned::Unsigned;
 use contatori::counters::Observable;
 use contatori::labeled_group;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
@@ -28,10 +27,10 @@ labeled_group!(
     HttpRequests,
     "http_requests_total",
     "method",
-    get: "GET": Unsigned,
-    post: "POST": Unsigned,
-    put: "PUT": Unsigned,
-    delete: "DELETE": Unsigned,
+    get: "GET": Monotone,
+    post: "POST": Monotone,
+    put: "PUT": Monotone,
+    delete: "DELETE": Monotone,
 );
 
 /// Sets up the OpenTelemetry meter provider and returns a Counter.
