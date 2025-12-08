@@ -63,7 +63,7 @@ Benchmarked on **Apple M2** (8 cores) with **8 threads**, each performing **100,
 │                                                                             │
 │  OpenTelemetry Counter  ████████████████████████████████████████   25.81 ms │
 │                                                                             │
-│  contatori Monotone                                                0.33 ms  │
+│  contatori Monotone     █                                          0.33 ms  │
 │                                                                             │
 │  Speedup: 79x faster                                                        │
 │                                                                             │
@@ -73,7 +73,7 @@ Benchmarked on **Apple M2** (8 cores) with **8 threads**, each performing **100,
 │                                                                             │
 │  OpenTelemetry Counter  ████████████████████████████████████████  356.46 ms │
 │                                                                             │
-│  contatori labeled_group!                                          0.21 ms  │
+│  cont. labeled_group!   ▏                                          0.21 ms  │
 │                                                                             │
 │  Speedup: 1665x faster                                                      │
 │                                                                             │
@@ -83,14 +83,14 @@ Benchmarked on **Apple M2** (8 cores) with **8 threads**, each performing **100,
 │                                                                             │
 │  OpenTelemetry Counter  ████████████████████████████████████████  350.45 ms │
 │                                                                             │
-│  contatori labeled_group!                                          0.32 ms  │
+│  cont. labeled_group!   ▏                                          0.32 ms  │
 │                                                                             │
 │  Speedup: 1093x faster                                                      │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Contatori is **79x to 1665x faster** than OpenTelemetry counters depending on usage pattern. This massive difference comes from:
+Contatori is **79x to ~1600x faster** than OpenTelemetry counters depending on usage pattern. This massive difference comes from:
 - **Zero runtime overhead**: Labels are resolved at compile time
 - **Sharded storage**: Each sub-counter uses the same sharding strategy
 - **No dynamic dispatch**: Direct field access instead of hash lookups
