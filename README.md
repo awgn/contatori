@@ -113,7 +113,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-contatori = "0.6"
+contatori = "0.7"
 ```
 
 ### Basic Usage
@@ -232,7 +232,7 @@ The `snapshot` module provides serializable types that work with any serde-compa
 
 ```toml
 [dependencies]
-contatori = { version = "0.6", features = ["serde"] }
+contatori = { version = "0.7", features = ["serde"] }
 ```
 
 ```rust
@@ -263,7 +263,7 @@ Renders counters as formatted ASCII tables using the `tabled` crate.
 
 ```toml
 [dependencies]
-contatori = { version = "0.6", features = ["table"] }
+contatori = { version = "0.7", features = ["table"] }
 ```
 
 ```rust
@@ -323,7 +323,7 @@ Serializes counters to JSON format using serde.
 
 ```toml
 [dependencies]
-contatori = { version = "0.6", features = ["json"] }
+contatori = { version = "0.7", features = ["json"] }
 ```
 
 ```rust
@@ -371,7 +371,7 @@ Exports counters in Prometheus exposition format using the official `prometheus`
 
 ```toml
 [dependencies]
-contatori = { version = "0.6", features = ["prometheus"] }
+contatori = { version = "0.7", features = ["prometheus"] }
 ```
 
 #### Automatic Metric Type Detection

@@ -179,7 +179,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.6", features = ["table"] }
+//! contatori = { version = "0.7", features = ["table"] }
 //! ```
 //!
 //! ```rust,ignore
@@ -198,7 +198,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.6", features = ["serde_json"] }
+//! contatori = { version = "0.7", features = ["serde_json"] }
 //! ```
 //!
 //! ```rust,ignore
@@ -213,7 +213,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.6", features = ["prometheus"] }
+//! contatori = { version = "0.7", features = ["prometheus"] }
 //! ```
 //!
 //! ```rust,ignore

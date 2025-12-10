@@ -10,7 +10,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! contatori = { version = "0.6", features = ["prometheus"] }
+//! contatori = { version = "0.7", features = ["prometheus"] }
 //! ```
 //!
 //! # How It Works
