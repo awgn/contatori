@@ -459,6 +459,105 @@ let output = observer.render(counters.into_iter()).unwrap();
 | `MetricType::Counter` | Cumulative metric that only goes up | `MetricKind::Counter` (`Monotone`) |
 | `MetricType::Gauge` | Value that can go up and down | `MetricKind::Gauge` (all other counters) |
 
+### OpenTelemetryObserver
+
+Exports counters to OpenTelemetry using observable instruments (callbacks). When OpenTelemetry collects metrics, it calls the registered callbacks which read values directly from contatori counters.
+
+```toml
+[dependencies]
+contatori = { version = "0.7", features = ["opentelemetry"] }
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-stdout = { version = "0.27", features = ["metrics"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+```
+
+```rust
+use contatori::counters::monotone::Monotone;
+use contatori::counters::unsigned::Unsigned;
+use contatori::counters::Observable;
+use contatori::observers::opentelemetry::OtelObserver;
+
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+use opentelemetry_sdk::runtime;
+use std::time::Duration;
+
+// Define static counters
+static HTTP_REQUESTS: Monotone = Monotone::new().with_name("http_requests_total");
+static ACTIVE_CONNECTIONS: Unsigned = Unsigned::new().with_name("active_connections");
+
+#[tokio::main]
+async fn main() {
+    // Setup OpenTelemetry with stdout exporter
+    let exporter = opentelemetry_stdout::MetricExporter::default();
+    let reader = PeriodicReader::builder(exporter, runtime::Tokio)
+        .with_interval(Duration::from_secs(60))
+        .build();
+    let provider = SdkMeterProvider::builder().with_reader(reader).build();
+    opentelemetry::global::set_meter_provider(provider.clone());
+
+    // Register contatori metrics with OpenTelemetry
+    let observer = OtelObserver::new("my_service");
+    let counters: &[&'static (dyn Observable + Send + Sync)] = &[
+        &HTTP_REQUESTS,
+        &ACTIVE_CONNECTIONS,
+    ];
+    observer.register(counters).unwrap();
+
+    // Update counters
+    HTTP_REQUESTS.add(100);
+    ACTIVE_CONNECTIONS.add(5);
+
+    // Flush metrics (they will be printed to stdout)
+    provider.force_flush().unwrap();
+    provider.shutdown().unwrap();
+}
+```
+
+#### Automatic Metric Type Detection
+
+| Counter Type | `MetricKind` | OpenTelemetry Type |
+|--------------|--------------|-------------------|
+| `Monotone` | `Counter` | ObservableCounter (u64) |
+| `Unsigned` | `Gauge` | ObservableGauge (f64) |
+| `Signed` | `Gauge` | ObservableGauge (f64) |
+| `Minimum` | `Gauge` | ObservableGauge (f64) |
+| `Maximum` | `Gauge` | ObservableGauge (f64) |
+| `Average` | `Gauge` | ObservableGauge (f64) |
+
+#### OtelObserver Configuration
+
+| Method | Description |
+|--------|-------------|
+| `new(scope_name)` | Creates observer with the given instrumentation scope name |
+| `with_description_prefix(str)` | Adds a prefix to metric descriptions |
+| `register(&[...])` | Registers static counters with OpenTelemetry |
+
+#### Labeled Groups Support
+
+Labeled groups are automatically exported with OpenTelemetry attributes:
+
+```rust
+use contatori::labeled_group;
+use contatori::counters::unsigned::Unsigned;
+
+labeled_group!(
+    HttpByMethod,
+    "http_requests_by_method",
+    "method",
+    get: "GET": Unsigned,
+    post: "POST": Unsigned,
+);
+
+static HTTP_METHODS: HttpByMethod = HttpByMethod::new();
+
+// Each counter becomes a data point with the "method" attribute
+HTTP_METHODS.get.add(100);  // method="GET"
+HTTP_METHODS.post.add(50);  // method="POST"
+```
+
+**Note:** Counters must be `'static` and implement `Send + Sync` to be registered with OpenTelemetry, as the callbacks are invoked asynchronously.
+
 ## Adapters 
 
 The library provides adapter types that add additional behavior to counters while maintaining compatibility with the `Observable` trait.
