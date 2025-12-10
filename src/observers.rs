@@ -5,6 +5,12 @@
 //! - [`table`] - Pretty-print counters as tables using the `tabled` crate
 //! - [`json`] - Serialize counters to JSON format
 //! - [`prometheus`] - Export counters in Prometheus exposition format
+//! - [`opentelemetry`] - Export counters via OpenTelemetry
+//!
+//! # Unified Error Handling
+//!
+//! All observers use a unified [`ObserverError`] type, allowing you to switch
+//! between observers without changing error handling code.
 //!
 //! # Feature Flags
 //!
@@ -13,6 +19,7 @@
 //! - `table` - Enables the [`table`] module
 //! - `json` - Enables the [`json`] module
 //! - `prometheus` - Enables the [`prometheus`] module
+//! - `opentelemetry` - Enables the [`opentelemetry`] module
 //! - `full` - Enables all observer modules
 //!
 //! # Example
@@ -20,16 +27,42 @@
 //! ```rust,ignore
 //! use contatori::counters::Observable;
 //! use contatori::counters::unsigned::Unsigned;
-//! use contatori::observers::table::TableObserver;
+//! use contatori::observers::{Result, ObserverError};
 //!
-//! let counters: Vec<Box<dyn Observable>> = vec![
-//!     Box::new(Unsigned::new().with_name("requests")),
-//!     Box::new(Unsigned::new().with_name("errors")),
-//! ];
+//! static REQUESTS: Unsigned = Unsigned::new().with_name("requests");
+//! static ERRORS: Unsigned = Unsigned::new().with_name("errors");
 //!
-//! let observer = TableObserver::new();
-//! println!("{}", observer.render(counters.iter().map(|c| c.as_ref())));
+//! fn export_metrics() -> Result<()> {
+//!     let counters: &[&'static dyn Observable] = &[&REQUESTS, &ERRORS];
+//!
+//!     #[cfg(feature = "prometheus")]
+//!     {
+//!         use contatori::observers::prometheus::PrometheusObserver;
+//!         let observer = PrometheusObserver::new();
+//!         let output = observer.render(counters.iter().copied())?;
+//!         println!("{}", output);
+//!     }
+//!
+//!     #[cfg(feature = "opentelemetry")]
+//!     {
+//!         use contatori::observers::opentelemetry::OtelObserver;
+//!         let observer = OtelObserver::new("myapp");
+//!         observer.register(counters)?;
+//!     }
+//!
+//!     Ok(())
+//! }
 //! ```
+
+mod error;
+
+pub use error::{ObserverError, Result};
+
+#[cfg(feature = "prometheus")]
+pub use error::PrometheusError;
+
+#[cfg(feature = "opentelemetry")]
+pub use error::OtelError;
 
 #[cfg(feature = "table")]
 pub mod table;
@@ -39,3 +72,6 @@ pub mod json;
 
 #[cfg(feature = "prometheus")]
 pub mod prometheus;
+
+#[cfg(feature = "opentelemetry")]
+pub mod opentelemetry;

@@ -80,52 +80,8 @@
 use crate::counters::{CounterValue, MetricKind, Observable, ObservableEntry};
 use prometheus::{Encoder, Gauge, IntCounter, IntGauge, Registry, TextEncoder};
 use std::collections::HashMap;
-use std::fmt;
 
-/// Error type for Prometheus observer operations.
-#[derive(Debug)]
-pub enum PrometheusError {
-    /// Error creating or registering a metric.
-    MetricError(String),
-    /// Error encoding metrics to text format.
-    EncodeError(String),
-    /// Error converting bytes to UTF-8 string.
-    Utf8Error(std::string::FromUtf8Error),
-}
-
-impl fmt::Display for PrometheusError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PrometheusError::MetricError(msg) => write!(f, "metric error: {}", msg),
-            PrometheusError::EncodeError(msg) => write!(f, "encode error: {}", msg),
-            PrometheusError::Utf8Error(err) => write!(f, "UTF-8 error: {}", err),
-        }
-    }
-}
-
-impl std::error::Error for PrometheusError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            PrometheusError::Utf8Error(err) => Some(err),
-            _ => None,
-        }
-    }
-}
-
-impl From<prometheus::Error> for PrometheusError {
-    fn from(err: prometheus::Error) -> Self {
-        PrometheusError::MetricError(err.to_string())
-    }
-}
-
-impl From<std::string::FromUtf8Error> for PrometheusError {
-    fn from(err: std::string::FromUtf8Error) -> Self {
-        PrometheusError::Utf8Error(err)
-    }
-}
-
-/// Result type for Prometheus observer operations.
-pub type Result<T> = std::result::Result<T, PrometheusError>;
+use super::{PrometheusError, Result};
 
 /// Prometheus metric type.
 ///
@@ -553,7 +509,7 @@ impl PrometheusObserver {
         encoder
             .encode(&metric_families, &mut buffer)
             .map_err(|e| PrometheusError::EncodeError(e.to_string()))?;
-        String::from_utf8(buffer).map_err(PrometheusError::from)
+        Ok(String::from_utf8(buffer)?)
     }
 
     /// Registers a counter metric with the given value.
