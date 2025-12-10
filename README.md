@@ -223,6 +223,7 @@ The library provides optional modules for serializing and exporting counter valu
 | `serde` | `snapshot` | Serializable snapshot types (use with any serde format) |
 | `table` | `observers::table` | Renders counters as ASCII tables |
 | `json` | `observers::json` | Serializes counters to JSON (includes `serde`) |
+| `opentelemetry` | `observers::opentelemetry` | Exports counters to OpenTelemetry metrics |
 | `prometheus` | `observers::prometheus` | Exports in Prometheus exposition format |
 | `full` | All modules | Enables all observer modules |
 
