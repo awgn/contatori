@@ -480,6 +480,7 @@ labeled_group!(
     HttpByMethod,
     "http_requests_by_method",
     "method",
+    value: Unsigned,
     get: "GET": Unsigned,
     post: "POST": Unsigned,
 );
@@ -487,8 +488,9 @@ labeled_group!(
 static HTTP_METHODS: HttpByMethod = HttpByMethod::new();
 
 // Each counter becomes a data point with the "method" attribute
-HTTP_METHODS.get.add(100);  // method="GET"
-HTTP_METHODS.post.add(50);  // method="POST"
+HTTP_METHODS.value.add(150); // Base metric (no label)
+HTTP_METHODS.get.add(100);   // method="GET"
+HTTP_METHODS.post.add(50);   // method="POST"
 ```
 
 **Note:** Counters must be `'static` and implement `Send + Sync` to be registered with OpenTelemetry, as the callbacks are invoked asynchronously.

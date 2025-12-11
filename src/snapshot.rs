@@ -301,20 +301,20 @@ mod tests {
             TestGroup,
             "test_metric",
             "label",
-            total: Unsigned,
+            value: Unsigned,
             a: "A": Unsigned,
             b: "B": Unsigned,
         );
 
         let group = TestGroup::new();
-        group.total.add(100);
+        group.value.add(100);
         group.a.add(60);
         group.b.add(40);
 
         let counters: Vec<&dyn Observable> = vec![&group];
         let snapshot = MetricsSnapshot::collect(counters.into_iter());
 
-        // Should have 3 entries: total (no label), a (label=A), b (label=B)
+        // Should have 3 entries: value (no label), a (label=A), b (label=B)
         assert_eq!(snapshot.counters.len(), 3);
 
         // Check that labels are preserved

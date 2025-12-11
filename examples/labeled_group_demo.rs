@@ -22,7 +22,7 @@ labeled_group!(
     HttpRequests,
     "http_requests_total",
     "method",
-    total: Unsigned,              // no label (aggregate)
+    value: Unsigned,              // base metric (mandatory)
     get: "GET": Unsigned,         // method="GET"
     post: "POST": Unsigned,       // method="POST"
     put: "PUT": Unsigned,         // method="PUT"
@@ -35,6 +35,7 @@ labeled_group!(
     HttpResponses,
     "http_responses_total",
     "status",
+    value: Unsigned,                  // base metric (mandatory)
     ok: "200": Unsigned,              // status="200"
     created: "201": Unsigned,         // status="201"
     bad_request: "400": Unsigned,     // status="400"
@@ -51,55 +52,63 @@ fn simulate_traffic() {
 
     // GET requests (most common)
     for _ in 0..150 {
-        HTTP_REQUESTS.total.add(1);
+        HTTP_REQUESTS.value.add(1);
         HTTP_REQUESTS.get.add(1);
+        HTTP_RESPONSES.value.add(1);
         HTTP_RESPONSES.ok.add(1);
     }
 
     // POST requests
     for _ in 0..50 {
-        HTTP_REQUESTS.total.add(1);
+        HTTP_REQUESTS.value.add(1);
         HTTP_REQUESTS.post.add(1);
+        HTTP_RESPONSES.value.add(1);
         HTTP_RESPONSES.created.add(1);
     }
 
     // PUT requests
     for _ in 0..30 {
-        HTTP_REQUESTS.total.add(1);
+        HTTP_REQUESTS.value.add(1);
         HTTP_REQUESTS.put.add(1);
+        HTTP_RESPONSES.value.add(1);
         HTTP_RESPONSES.ok.add(1);
     }
 
     // DELETE requests
     for _ in 0..10 {
-        HTTP_REQUESTS.total.add(1);
+        HTTP_REQUESTS.value.add(1);
         HTTP_REQUESTS.delete.add(1);
+        HTTP_RESPONSES.value.add(1);
         HTTP_RESPONSES.ok.add(1);
     }
 
     // PATCH requests
     for _ in 0..5 {
-        HTTP_REQUESTS.total.add(1);
+        HTTP_REQUESTS.value.add(1);
         HTTP_REQUESTS.patch.add(1);
+        HTTP_RESPONSES.value.add(1);
         HTTP_RESPONSES.ok.add(1);
     }
 
     // Some errors
     for _ in 0..15 {
-        HTTP_REQUESTS.total.add(1);
+        HTTP_REQUESTS.value.add(1);
         HTTP_REQUESTS.get.add(1);
+        HTTP_RESPONSES.value.add(1);
         HTTP_RESPONSES.not_found.add(1);
     }
 
     for _ in 0..5 {
-        HTTP_REQUESTS.total.add(1);
+        HTTP_REQUESTS.value.add(1);
         HTTP_REQUESTS.post.add(1);
+        HTTP_RESPONSES.value.add(1);
         HTTP_RESPONSES.bad_request.add(1);
     }
 
     for _ in 0..3 {
-        HTTP_REQUESTS.total.add(1);
+        HTTP_REQUESTS.value.add(1);
         HTTP_REQUESTS.get.add(1);
+        HTTP_RESPONSES.value.add(1);
         HTTP_RESPONSES.server_error.add(1);
     }
 }
@@ -119,35 +128,41 @@ fn simulate_concurrent_traffic(num_threads: usize, iterations: usize) {
                 // Simulate different request patterns per thread
                 let method_choice = (thread_id + i) % 5;
 
-                req.total.add(1);
+                req.value.add(1);
 
                 match method_choice {
                     0 => {
                         req.get.add(1);
+                        resp.value.add(1);
                         resp.ok.add(1);
                     }
                     1 => {
                         req.post.add(1);
+                        resp.value.add(1);
                         resp.created.add(1);
                     }
                     2 => {
                         req.put.add(1);
+                        resp.value.add(1);
                         resp.ok.add(1);
                     }
                     3 => {
                         req.delete.add(1);
+                        resp.value.add(1);
                         resp.ok.add(1);
                     }
                     _ => {
                         req.patch.add(1);
+                        resp.value.add(1);
                         resp.ok.add(1);
                     }
                 }
 
                 // Simulate some errors
                 if i % 100 == 0 {
-                    req.total.add(1);
+                    req.value.add(1);
                     req.get.add(1);
+                    resp.value.add(1);
                     resp.not_found.add(1);
                 }
             }
@@ -231,12 +246,12 @@ fn main() {
 
     // === Direct Access Demo ===
     println!("\n--- Direct Field Access ---\n");
-    println!("HTTP_REQUESTS.total = {}", HTTP_REQUESTS.total.value());
-    println!("HTTP_REQUESTS.get   = {}", HTTP_REQUESTS.get.value());
-    println!("HTTP_REQUESTS.post  = {}", HTTP_REQUESTS.post.value());
-    println!("HTTP_REQUESTS.put   = {}", HTTP_REQUESTS.put.value());
+    println!("HTTP_REQUESTS.value  = {}", HTTP_REQUESTS.value.value());
+    println!("HTTP_REQUESTS.get    = {}", HTTP_REQUESTS.get.value());
+    println!("HTTP_REQUESTS.post   = {}", HTTP_REQUESTS.post.value());
+    println!("HTTP_REQUESTS.put    = {}", HTTP_REQUESTS.put.value());
     println!("HTTP_REQUESTS.delete = {}", HTTP_REQUESTS.delete.value());
-    println!("HTTP_REQUESTS.patch = {}", HTTP_REQUESTS.patch.value());
+    println!("HTTP_REQUESTS.patch  = {}", HTTP_REQUESTS.patch.value());
 
     // === expand() Demo ===
     println!("\n--- Using expand() ---\n");
@@ -249,7 +264,7 @@ fn main() {
                 );
             }
             None => {
-                println!("  {} = {} (total)", entry.name, entry.value);
+                println!("  {} = {} (base value)", entry.name, entry.value);
             }
         }
     }

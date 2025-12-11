@@ -34,6 +34,7 @@ labeled_group!(
     HttpByMethod,
     "http_requests_by_method",
     "method",
+    value: Unsigned,
     get: "GET": Unsigned,
     post: "POST": Unsigned,
     put: "PUT": Unsigned,
@@ -46,6 +47,7 @@ labeled_group!(
     HttpByStatus,
     "http_responses_by_status",
     "status",
+    value: Unsigned,
     ok: "2xx": Unsigned,
     redirect: "3xx": Unsigned,
     client_error: "4xx": Unsigned,
@@ -91,6 +93,7 @@ fn simulate_traffic() {
     for i in 0..100 {
         HTTP_REQUESTS.add(1);
 
+        HTTP_METHODS.value.add(1);
         match i % 4 {
             0 => HTTP_METHODS.get.add(1),
             1 => HTTP_METHODS.post.add(1),
@@ -98,6 +101,7 @@ fn simulate_traffic() {
             _ => HTTP_METHODS.delete.add(1),
         }
 
+        HTTP_STATUS.value.add(1);
         match i % 10 {
             0..=6 => HTTP_STATUS.ok.add(1),
             7 => HTTP_STATUS.redirect.add(1),

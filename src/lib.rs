@@ -125,7 +125,7 @@
 //!     HttpRequests,
 //!     "http_requests",
 //!     "method",
-//!     total: Unsigned,
+//!     value: Unsigned,         // Base metric (mandatory)
 //!     get: "GET": Unsigned,
 //!     post: "POST": Unsigned,
 //! );
@@ -133,12 +133,12 @@
 //! static HTTP: HttpRequests = HttpRequests::new();
 //!
 //! // Direct field access for incrementing
-//! HTTP.total.add(1);
-//! HTTP.get.add(1);
+//! HTTP.value.add(1);  // Base metric
+//! HTTP.get.add(1);    // GET requests
 //!
 //! // Observers use expand() to get all sub-counters with their labels
 //! // Prometheus output will be:
-//! // http_requests 1          (no label - the total)
+//! // http_requests 1                (no label - base value)
 //! // http_requests{method="GET"} 1
 //! // http_requests{method="POST"} 0
 //! ```

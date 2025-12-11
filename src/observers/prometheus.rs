@@ -871,13 +871,13 @@ mod tests {
             TestHttpRequests,
             "http_requests",
             "method",
-            total: Unsigned,
+            value: Unsigned,
             get: "GET": Unsigned,
             post: "POST": Unsigned,
         );
 
         let requests = TestHttpRequests::new();
-        requests.total.add(150);
+        requests.value.add(150);
         requests.get.add(100);
         requests.post.add(50);
 
@@ -901,6 +901,7 @@ mod tests {
             TestRequests,
             "requests",
             "method",
+            value: Unsigned,
             post: "POST": Unsigned,
         );
 
@@ -985,6 +986,7 @@ mod tests {
             TestMonotoneGroup,
             "labeled_monotone",
             "env",
+            value: Monotone,
             prod: "prod": Monotone,
         );
 
@@ -992,6 +994,7 @@ mod tests {
             TestUnsignedGroup,
             "labeled_unsigned",
             "env",
+            value: Unsigned,
             prod: "prod": Unsigned,
         );
 

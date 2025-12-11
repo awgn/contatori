@@ -27,6 +27,7 @@ labeled_group!(
     HttpRequests,
     "http_requests_total",
     "method",
+    value: Monotone,
     get: "GET": Monotone,
     post: "POST": Monotone,
     put: "PUT": Monotone,

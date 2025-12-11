@@ -43,7 +43,7 @@
 //!     HttpRequests,
 //!     "http_requests",
 //!     "method",
-//!     total: Unsigned,
+//!     value: Unsigned,
 //!     get: "GET": Unsigned,
 //!     post: "POST": Unsigned,
 //! );
@@ -51,7 +51,7 @@
 //! static HTTP: HttpRequests = HttpRequests::new();
 //!
 //! // Direct field access for incrementing
-//! HTTP.total.add(1);
+//! HTTP.value.add(1);
 //! HTTP.get.add(1);
 //!
 //! // expand() returns all sub-counters with their label
