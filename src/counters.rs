@@ -67,7 +67,7 @@ use std::{
 ///
 /// Each slot is cache-line padded (64 bytes), so total memory per counter is:
 /// `64 slots × 64 bytes = 4,096 bytes (4KB)`
-pub(crate) const NUM_COMPONENTS: usize = 64;
+pub(crate) const NUM_COMPONENTS: usize = 128;
 
 /// Global counter for assigning slot IDs to threads.
 ///

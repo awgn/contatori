@@ -17,8 +17,8 @@
 //! ## Standard format (vertical list)
 //!
 //! ```rust,ignore
-//! use contatori::contatori::unsigned::Unsigned;
-//! use contatori::contatori::Observable;
+//! use contatori::counters::unsigned::Unsigned;
+//! use contatori::counters::Observable;
 //! use contatori::observers::table::{TableObserver, TableStyle};
 //!
 //! let requests = Unsigned::new().with_name("requests");
@@ -170,8 +170,8 @@ struct CounterRow {
 /// Standard mode:
 ///
 /// ```rust,ignore
-/// use contatori::contatori::unsigned::Unsigned;
-/// use contatori::contatori::Observable;
+/// use contatori::counters::unsigned::Unsigned;
+/// use contatori::counters::Observable;
 /// use contatori::observers::table::TableObserver;
 ///
 /// let counter = Unsigned::new().with_name("requests");
@@ -433,8 +433,8 @@ impl TableObserver {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use contatori::contatori::unsigned::Unsigned;
-    /// use contatori::contatori::Observable;
+    /// use contatori::counters::unsigned::Unsigned;
+    /// use contatori::counters::Observable;
     /// use contatori::observers::table::TableObserver;
     ///
     /// let requests = Unsigned::new().with_name("requests");

@@ -37,8 +37,8 @@
 //! Basic usage:
 //!
 //! ```rust,ignore
-//! use contatori::contatori::unsigned::Unsigned;
-//! use contatori::contatori::Observable;
+//! use contatori::counters::unsigned::Unsigned;
+//! use contatori::counters::Observable;
 //! use contatori::observers::prometheus::{PrometheusObserver, MetricType};
 //!
 //! let requests = Unsigned::new().with_name("http_requests_total");
@@ -117,8 +117,8 @@ pub struct MetricConfig {
 /// # Example
 ///
 /// ```rust,ignore
-/// use contatori::contatori::unsigned::Unsigned;
-/// use contatori::contatori::Observable;
+/// use contatori::counters::unsigned::Unsigned;
+/// use contatori::counters::Observable;
 /// use contatori::observers::prometheus::PrometheusObserver;
 ///
 /// let counter = Unsigned::new().with_name("my_counter");

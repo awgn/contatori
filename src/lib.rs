@@ -173,6 +173,7 @@
 //! | `table` | [`observers::table`] | Pretty-print counters as ASCII tables |
 //! | `json` | [`observers::json`] | Serialize counters to JSON |
 //! | `prometheus` | [`observers::prometheus`] | Export in Prometheus exposition format |
+//! | `opentelemetry` | [`observers::opentelemetry`] | Export to OpenTelemetry using observable instruments |
 //! | `full` | All observers | Enables all observer modules |
 //!
 //! ### Example: Table Output
@@ -223,6 +224,24 @@
 //!     .with_prefix("myapp")
 //!     .with_global_label("instance", "server-1")
 //!     .render(counters.into_iter());
+//! ```
+//!
+//! ### Example: OpenTelemetry Output
+//!
+//! ```toml
+//! [dependencies]
+//! contatori = { version = "0.7", features = ["opentelemetry"] }
+//! opentelemetry = "0.27"
+//! opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+//! ```
+//!
+//! ```rust,ignore
+//! use contatori::observers::opentelemetry::OtelObserver;
+//!
+//! // Setup OpenTelemetry MeterProvider first
+//! let observer = OtelObserver::new("my_service");
+//! observer.register(&[&REQUESTS, &ERRORS])?;
+//! // Counters are now exported via OpenTelemetry
 //! ```
 
 pub mod adapters;

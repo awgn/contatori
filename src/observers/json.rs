@@ -15,8 +15,8 @@
 //! # Examples
 //!
 //! ```rust,ignore
-//! use contatori::contatori::unsigned::Unsigned;
-//! use contatori::contatori::Observable;
+//! use contatori::counters::unsigned::Unsigned;
+//! use contatori::counters::Observable;
 //! use contatori::observers::json::JsonObserver;
 //!
 //! let requests = Unsigned::new().with_name("http_requests");
@@ -57,8 +57,8 @@ pub struct JsonConfig {
 /// Basic usage (array of counters):
 ///
 /// ```rust,ignore
-/// use contatori::contatori::unsigned::Unsigned;
-/// use contatori::contatori::Observable;
+/// use contatori::counters::unsigned::Unsigned;
+/// use contatori::counters::Observable;
 /// use contatori::observers::json::JsonObserver;
 ///
 /// let counter = Unsigned::new().with_name("requests");

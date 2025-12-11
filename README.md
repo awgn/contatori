@@ -49,7 +49,7 @@ Benchmarked on **Apple M2** (8 cores) with **8 threads**, each performing **1,00
 
 The sharded counter is **~72x faster** than a naive atomic counter under high contention. This difference grows with more threads and higher contention.
 
-### Contatori vs OpenTelemetry
+### Contatori vs OpenTelemetry Counters/Gauges
 
 Benchmarked on **Apple M2** (8 cores) with **8 threads**, each performing **100,000 increments**:
 
@@ -208,15 +208,15 @@ println!("Avg: {}", avg_latency.value());  // 130
 
 ## Thread Safety
 
-All counter types are `Send + Sync` and can be safely shared across threads using `Arc<Counter>`. The sharding ensures that concurrent updates are efficient.
+All counter types are `Send + Sync` and can be safely shared across threads using `Arc<Counter>`. In addition, counters constructors are const functions, enabling global initialization. The sharding ensures that concurrent updates are efficient.
 
 ## Memory Usage
 
-Each counter uses approximately **4KB of memory** (64 slots × 64 bytes per cache line). This is a trade-off: more memory for dramatically better performance under contention.
+Each counter uses approximately **8KB of memory** (128 slots × 64 bytes per cache line). This is a trade-off: more memory for dramatically better performance under contention.
 
 ## Serialization & Observers
 
-The library provides optional modules for serializing and exporting counter values in various formats. Each module is gated behind a feature flag:
+The library provides modules for serializing and exporting counter values in various formats. Each module is gated behind a feature flag:
 
 | Feature | Module | Description |
 |---------|--------|-------------|
@@ -304,20 +304,6 @@ println!("{}", observer.render(counters.into_iter()));
 
 **Compact separators:** `Colon` (`:`), `Equals` (`=`), `Arrow` (`→`), `Pipe` (`|`), `Space`
 
-#### TableObserver Configuration
-
-| Method | Description |
-|--------|-------------|
-| `with_style(TableStyle)` | Sets the table border style |
-| `with_header(bool)` | Shows or hides the header row |
-| `with_title(String)` | Adds a title above the table |
-| `compact(bool)` | Enables compact horizontal layout |
-| `columns(usize)` | Number of columns in compact mode |
-| `separator(CompactSeparator)` | Separator between name and value in compact mode |
-| `render(iter)` | Renders the counters to a string |
-
-**Note:** To reset counters when rendering, wrap them with `Resettable`.
-
 ### JsonObserver
 
 Serializes counters to JSON format using serde.
@@ -353,19 +339,6 @@ let json = JsonObserver::new()
     .to_json(counters.into_iter())
     .unwrap();
 ```
-
-#### JsonObserver Configuration
-
-| Method | Description |
-|--------|-------------|
-| `pretty(bool)` | Enables pretty-printed JSON output |
-| `wrap_in_snapshot(bool)` | Wraps output in a `MetricsSnapshot` object |
-| `include_timestamp(bool)` | Includes timestamp in the snapshot (requires `wrap_in_snapshot`) |
-| `to_json(iter)` | Serializes counters to a JSON string |
-| `collect(iter)` | Returns a `Vec<CounterSnapshot>` for custom processing |
-
-**Note:** To reset counters when serializing, wrap them with `Resettable`.
-
 ### PrometheusObserver
 
 Exports counters in Prometheus exposition format using the official `prometheus` crate.
@@ -418,47 +391,6 @@ let output = observer.render(counters.into_iter()).unwrap();
 // # TYPE myapp_http_requests_total counter
 // # TYPE myapp_active_connections gauge
 ```
-
-#### Manual Type Override
-
-You can override the auto-detected type using `with_type()`:
-
-```rust
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
-use contatori::observers::prometheus::{PrometheusObserver, MetricType};
-
-let requests = Unsigned::new().with_name("http_requests_total");
-requests.add(1000);
-
-let counters: Vec<&dyn Observable> = vec![&requests];
-
-// Force Unsigned to be exported as Counter instead of Gauge
-let observer = PrometheusObserver::new()
-    .with_type("http_requests_total", MetricType::Counter);
-
-let output = observer.render(counters.into_iter()).unwrap();
-```
-
-#### PrometheusObserver Configuration
-
-| Method | Description |
-|--------|-------------|
-| `with_namespace(str)` | Sets a prefix for all metric names (e.g., `myapp_`) |
-| `with_subsystem(str)` | Sets a subsystem between namespace and metric name |
-| `with_const_label(name, value)` | Adds a constant label to all metrics |
-| `with_type(name, MetricType)` | Overrides auto-detected metric type (`Counter` or `Gauge`) |
-| `with_help(name, text)` | Sets the help text for a specific metric |
-| `render(iter)` | Renders counters to Prometheus exposition format |
-
-**Note:** To reset counters when rendering, wrap them with `Resettable`.
-
-#### Metric Types
-
-| Prometheus Type | Description | Auto-detected from `MetricKind` |
-|-----------------|-------------|--------------------------------|
-| `MetricType::Counter` | Cumulative metric that only goes up | `MetricKind::Counter` (`Monotone`) |
-| `MetricType::Gauge` | Value that can go up and down | `MetricKind::Gauge` (all other counters) |
 
 ### OpenTelemetryObserver
 
@@ -517,6 +449,8 @@ async fn main() {
 
 #### Automatic Metric Type Detection
 
+The observer automatically determines the correct OpenTelemetry instrument type based on the counter's `metric_kind()` method:
+
 | Counter Type | `MetricKind` | OpenTelemetry Type |
 |--------------|--------------|-------------------|
 | `Monotone` | `Counter` | ObservableCounter (u64) |
@@ -531,7 +465,7 @@ async fn main() {
 | Method | Description |
 |--------|-------------|
 | `new(scope_name)` | Creates observer with the given instrumentation scope name |
-| `with_description_prefix(str)` | Adds a prefix to metric descriptions |
+| `with_description_prefix(str)` | Adds a prefix to all metric descriptions |
 | `register(&[...])` | Registers static counters with OpenTelemetry |
 
 #### Labeled Groups Support
@@ -640,44 +574,6 @@ The `Rate` counter:
 - Returns `MetricKind::Gauge` (rates can go up or down)
 - Exports as float values in Prometheus
 
-### Labeled Group
-
-The `labeled_group!` macro creates a struct containing multiple counters that share a metric name but have different label values. This is the recommended way to track metrics with labels (e.g., HTTP requests by method).
-
-```rust
-use contatori::labeled_group;
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
-
-// Define a labeled group
-labeled_group!(
-    HttpRequests,
-    "http_requests",    // metric name
-    "method",           // label key
-    total: Unsigned,              // no label (aggregate)
-    get: "GET": Unsigned,         // method="GET"
-    post: "POST": Unsigned,       // method="POST"
-    put: "PUT": Unsigned,         // method="PUT"
-    delete: "DELETE": Unsigned,   // method="DELETE"
-);
-
-// Can be used as a static
-static HTTP: HttpRequests = HttpRequests::new();
-
-// Direct field access for incrementing
-HTTP.total.add(1);
-HTTP.get.add(1);
-
-// Observers automatically expand the group:
-// http_requests 1           (no label - the total)
-// http_requests{method="GET"} 1
-// http_requests{method="POST"} 0
-// http_requests{method="PUT"} 0
-// http_requests{method="DELETE"} 0
-```
-
-The `expand()` method on `Observable` returns all sub-counters with their labels, which observers use automatically.
-
 ## When to Use Sharded Counters
 
 Sharded counters are ideal when:
@@ -702,21 +598,3 @@ cargo test
 ## License
 
 MIT
-
-## Architecture Diagram
-
-```
-                         ┌─────────────────────────────────────┐
-                         │         Counter Structure           │
-                         ├─────────────────────────────────────┤
-  Thread 0 ──writes──►   │ [Slot 0] ████████ (CachePadded)     │
-  Thread 1 ──writes──►   │ [Slot 1] ████████ (CachePadded)     │
-  Thread 2 ──writes──►   │ [Slot 2] ████████ (CachePadded)     │
-       ...               │    ...                              │
-  Thread 63 ─writes──►   │ [Slot 63] ███████ (CachePadded)     │
-                         └─────────────────────────────────────┘
-                                         │
-                                         ▼
-                                  value() aggregates
-                                  all slots on read
-```
