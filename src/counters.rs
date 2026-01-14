@@ -56,6 +56,7 @@ use std::{
     fmt::Debug,
     fmt::Display,
     sync::atomic::{AtomicUsize, Ordering},
+    ops::{Add, AddAssign, Sub, SubAssign}
 };
 
 /// Number of shards (slots) used by each counter.
@@ -133,6 +134,66 @@ impl Display for CounterValue {
             CounterValue::Signed(v) => write!(f, "{}", v),
             CounterValue::Float(v) => write!(f, "{}", v),
         }
+    }
+}
+
+impl Add for CounterValue {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self::Output {
+        use CounterValue::*;
+        match (self, other) {
+            // Same type: keep the original type
+            (Unsigned(a), Unsigned(b)) => Unsigned(a.wrapping_add(b)), // using wrapping to avoid panic in debug
+            (Signed(a), Signed(b)) => Signed(a + b),
+            (Float(a), Float(b)) => Float(a + b),
+
+            // Float mixes: always promote to Float
+            (Float(a), Unsigned(b)) => Float(a + b as f64),
+            (Unsigned(a), Float(b)) => Float(a as f64 + b),
+            (Float(a), Signed(b)) => Float(a + b as f64),
+            (Signed(a), Float(b)) => Float(a as f64 + b),
+
+            // Signed/Unsigned mixes: promote to Signed
+            (Signed(a), Unsigned(b)) => Signed(a + b as i64),
+            (Unsigned(a), Signed(b)) => Signed(a as i64 + b),
+        }
+    }
+}
+
+impl Sub for CounterValue {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self::Output {
+        use CounterValue::*;
+        match (self, other) {
+            // Same type
+            (Unsigned(a), Unsigned(b)) => Unsigned(a.wrapping_sub(b)),
+            (Signed(a), Signed(b)) => Signed(a - b),
+            (Float(a), Float(b)) => Float(a - b),
+
+            // Float mixes
+            (Float(a), Unsigned(b)) => Float(a - b as f64),
+            (Unsigned(a), Float(b)) => Float(a as f64 - b),
+            (Float(a), Signed(b)) => Float(a - b as f64),
+            (Signed(a), Float(b)) => Float(a as f64 - b),
+
+            // Signed/Unsigned mixes: promote to Signed
+            (Signed(a), Unsigned(b)) => Signed(a - b as i64),
+            (Unsigned(a), Signed(b)) => Signed(a as i64 - b),
+        }
+    }
+}
+
+impl AddAssign for CounterValue {
+    fn add_assign(&mut self, other: Self) {
+        *self = *self + other;
+    }
+}
+
+impl SubAssign for CounterValue {
+    fn sub_assign(&mut self, other: Self) {
+        *self = *self - other;
     }
 }
 
@@ -457,4 +518,326 @@ pub trait GetComponentCounter {
     ///
     /// This should use `THREAD_SLOT_INDEX` to determine which shard to return.
     fn get_component_counter(&self) -> &Self::CounterType;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CounterValue;
+
+    // ==================== Add Tests ====================
+
+    #[test]
+    fn add_unsigned_unsigned() {
+        let a = CounterValue::Unsigned(10);
+        let b = CounterValue::Unsigned(20);
+        assert!(matches!(a + b, CounterValue::Unsigned(30)));
+    }
+
+    #[test]
+    fn add_signed_signed() {
+        let a = CounterValue::Signed(-10);
+        let b = CounterValue::Signed(20);
+        assert!(matches!(a + b, CounterValue::Signed(10)));
+    }
+
+    #[test]
+    fn add_float_float() {
+        let a = CounterValue::Float(1.5);
+        let b = CounterValue::Float(2.5);
+        match a + b {
+            CounterValue::Float(v) => assert!((v - 4.0).abs() < f64::EPSILON),
+            _ => panic!("Expected Float variant"),
+        }
+    }
+
+    #[test]
+    fn add_unsigned_signed_promotes_to_signed() {
+        let a = CounterValue::Unsigned(10);
+        let b = CounterValue::Signed(-3);
+        assert!(matches!(a + b, CounterValue::Signed(7)));
+    }
+
+    #[test]
+    fn add_signed_unsigned_promotes_to_signed() {
+        let a = CounterValue::Signed(-5);
+        let b = CounterValue::Unsigned(15);
+        assert!(matches!(a + b, CounterValue::Signed(10)));
+    }
+
+    #[test]
+    fn add_float_unsigned_promotes_to_float() {
+        let a = CounterValue::Float(1.5);
+        let b = CounterValue::Unsigned(2);
+        match a + b {
+            CounterValue::Float(v) => assert!((v - 3.5).abs() < f64::EPSILON),
+            _ => panic!("Expected Float variant"),
+        }
+    }
+
+    #[test]
+    fn add_unsigned_float_promotes_to_float() {
+        let a = CounterValue::Unsigned(3);
+        let b = CounterValue::Float(0.5);
+        match a + b {
+            CounterValue::Float(v) => assert!((v - 3.5).abs() < f64::EPSILON),
+            _ => panic!("Expected Float variant"),
+        }
+    }
+
+    #[test]
+    fn add_float_signed_promotes_to_float() {
+        let a = CounterValue::Float(5.0);
+        let b = CounterValue::Signed(-2);
+        match a + b {
+            CounterValue::Float(v) => assert!((v - 3.0).abs() < f64::EPSILON),
+            _ => panic!("Expected Float variant"),
+        }
+    }
+
+    #[test]
+    fn add_signed_float_promotes_to_float() {
+        let a = CounterValue::Signed(-2);
+        let b = CounterValue::Float(5.0);
+        match a + b {
+            CounterValue::Float(v) => assert!((v - 3.0).abs() < f64::EPSILON),
+            _ => panic!("Expected Float variant"),
+        }
+    }
+
+    #[test]
+    fn add_unsigned_wrapping_overflow() {
+        let a = CounterValue::Unsigned(u64::MAX);
+        let b = CounterValue::Unsigned(1);
+        assert!(matches!(a + b, CounterValue::Unsigned(0)));
+    }
+
+    // ==================== Sub Tests ====================
+
+    #[test]
+    fn sub_unsigned_unsigned() {
+        let a = CounterValue::Unsigned(30);
+        let b = CounterValue::Unsigned(10);
+        assert!(matches!(a - b, CounterValue::Unsigned(20)));
+    }
+
+    #[test]
+    fn sub_signed_signed() {
+        let a = CounterValue::Signed(10);
+        let b = CounterValue::Signed(20);
+        assert!(matches!(a - b, CounterValue::Signed(-10)));
+    }
+
+    #[test]
+    fn sub_float_float() {
+        let a = CounterValue::Float(5.5);
+        let b = CounterValue::Float(2.5);
+        match a - b {
+            CounterValue::Float(v) => assert!((v - 3.0).abs() < f64::EPSILON),
+            _ => panic!("Expected Float variant"),
+        }
+    }
+
+    #[test]
+    fn sub_unsigned_signed_promotes_to_signed() {
+        let a = CounterValue::Unsigned(10);
+        let b = CounterValue::Signed(3);
+        assert!(matches!(a - b, CounterValue::Signed(7)));
+    }
+
+    #[test]
+    fn sub_signed_unsigned_promotes_to_signed() {
+        let a = CounterValue::Signed(5);
+        let b = CounterValue::Unsigned(15);
+        assert!(matches!(a - b, CounterValue::Signed(-10)));
+    }
+
+    #[test]
+    fn sub_float_unsigned_promotes_to_float() {
+        let a = CounterValue::Float(5.5);
+        let b = CounterValue::Unsigned(2);
+        match a - b {
+            CounterValue::Float(v) => assert!((v - 3.5).abs() < f64::EPSILON),
+            _ => panic!("Expected Float variant"),
+        }
+    }
+
+    #[test]
+    fn sub_unsigned_float_promotes_to_float() {
+        let a = CounterValue::Unsigned(5);
+        let b = CounterValue::Float(2.5);
+        match a - b {
+            CounterValue::Float(v) => assert!((v - 2.5).abs() < f64::EPSILON),
+            _ => panic!("Expected Float variant"),
+        }
+    }
+
+    #[test]
+    fn sub_float_signed_promotes_to_float() {
+        let a = CounterValue::Float(5.0);
+        let b = CounterValue::Signed(2);
+        match a - b {
+            CounterValue::Float(v) => assert!((v - 3.0).abs() < f64::EPSILON),
+            _ => panic!("Expected Float variant"),
+        }
+    }
+
+    #[test]
+    fn sub_signed_float_promotes_to_float() {
+        let a = CounterValue::Signed(5);
+        let b = CounterValue::Float(2.5);
+        match a - b {
+            CounterValue::Float(v) => assert!((v - 2.5).abs() < f64::EPSILON),
+            _ => panic!("Expected Float variant"),
+        }
+    }
+
+    #[test]
+    fn sub_unsigned_wrapping_underflow() {
+        let a = CounterValue::Unsigned(0);
+        let b = CounterValue::Unsigned(1);
+        assert!(matches!(a - b, CounterValue::Unsigned(u64::MAX)));
+    }
+
+    // ==================== AddAssign Tests ====================
+
+    #[test]
+    fn add_assign_unsigned_unsigned() {
+        let mut a = CounterValue::Unsigned(10);
+        a += CounterValue::Unsigned(20);
+        assert!(matches!(a, CounterValue::Unsigned(30)));
+    }
+
+    #[test]
+    fn add_assign_signed_signed() {
+        let mut a = CounterValue::Signed(-10);
+        a += CounterValue::Signed(20);
+        assert!(matches!(a, CounterValue::Signed(10)));
+    }
+
+    #[test]
+    fn add_assign_float_float() {
+        let mut a = CounterValue::Float(1.5);
+        a += CounterValue::Float(2.5);
+        match a {
+            CounterValue::Float(v) => assert!((v - 4.0).abs() < f64::EPSILON),
+            _ => panic!("Expected Float variant"),
+        }
+    }
+
+    #[test]
+    fn add_assign_unsigned_signed_promotes_to_signed() {
+        let mut a = CounterValue::Unsigned(10);
+        a += CounterValue::Signed(-3);
+        assert!(matches!(a, CounterValue::Signed(7)));
+    }
+
+    #[test]
+    fn add_assign_float_unsigned_stays_float() {
+        let mut a = CounterValue::Float(1.5);
+        a += CounterValue::Unsigned(2);
+        match a {
+            CounterValue::Float(v) => assert!((v - 3.5).abs() < f64::EPSILON),
+            _ => panic!("Expected Float variant"),
+        }
+    }
+
+    // ==================== SubAssign Tests ====================
+
+    #[test]
+    fn sub_assign_unsigned_unsigned() {
+        let mut a = CounterValue::Unsigned(30);
+        a -= CounterValue::Unsigned(10);
+        assert!(matches!(a, CounterValue::Unsigned(20)));
+    }
+
+    #[test]
+    fn sub_assign_signed_signed() {
+        let mut a = CounterValue::Signed(10);
+        a -= CounterValue::Signed(20);
+        assert!(matches!(a, CounterValue::Signed(-10)));
+    }
+
+    #[test]
+    fn sub_assign_float_float() {
+        let mut a = CounterValue::Float(5.5);
+        a -= CounterValue::Float(2.5);
+        match a {
+            CounterValue::Float(v) => assert!((v - 3.0).abs() < f64::EPSILON),
+            _ => panic!("Expected Float variant"),
+        }
+    }
+
+    #[test]
+    fn sub_assign_unsigned_signed_promotes_to_signed() {
+        let mut a = CounterValue::Unsigned(10);
+        a -= CounterValue::Signed(3);
+        assert!(matches!(a, CounterValue::Signed(7)));
+    }
+
+    #[test]
+    fn sub_assign_float_unsigned_stays_float() {
+        let mut a = CounterValue::Float(10.5);
+        a -= CounterValue::Unsigned(3);
+        match a {
+            CounterValue::Float(v) => assert!((v - 7.5).abs() < f64::EPSILON),
+            _ => panic!("Expected Float variant"),
+        }
+    }
+
+    // ==================== Edge Cases ====================
+
+    #[test]
+    fn add_zero_unsigned() {
+        let a = CounterValue::Unsigned(42);
+        let b = CounterValue::Unsigned(0);
+        assert!(matches!(a + b, CounterValue::Unsigned(42)));
+    }
+
+    #[test]
+    fn sub_zero_unsigned() {
+        let a = CounterValue::Unsigned(42);
+        let b = CounterValue::Unsigned(0);
+        assert!(matches!(a - b, CounterValue::Unsigned(42)));
+    }
+
+    #[test]
+    fn add_negative_signed() {
+        let a = CounterValue::Signed(-10);
+        let b = CounterValue::Signed(-20);
+        assert!(matches!(a + b, CounterValue::Signed(-30)));
+    }
+
+    #[test]
+    fn sub_negative_signed() {
+        let a = CounterValue::Signed(-10);
+        let b = CounterValue::Signed(-20);
+        assert!(matches!(a - b, CounterValue::Signed(10)));
+    }
+
+    #[test]
+    fn add_assign_multiple_operations() {
+        let mut a = CounterValue::Unsigned(0);
+        a += CounterValue::Unsigned(10);
+        a += CounterValue::Unsigned(20);
+        a += CounterValue::Unsigned(30);
+        assert!(matches!(a, CounterValue::Unsigned(60)));
+    }
+
+    #[test]
+    fn sub_assign_multiple_operations() {
+        let mut a = CounterValue::Signed(100);
+        a -= CounterValue::Signed(30);
+        a -= CounterValue::Signed(20);
+        a -= CounterValue::Signed(10);
+        assert!(matches!(a, CounterValue::Signed(40)));
+    }
+
+    #[test]
+    fn mixed_add_sub_assign_operations() {
+        let mut a = CounterValue::Signed(50);
+        a += CounterValue::Signed(25);
+        a -= CounterValue::Signed(15);
+        a += CounterValue::Signed(-10);
+        assert!(matches!(a, CounterValue::Signed(50)));
+    }
 }
