@@ -131,6 +131,50 @@ fn bench_labeled_group(c: &mut Criterion) {
 
     group.bench_function(
         BenchmarkId::new(
+            "contatori Local<labeled_group!> (batch=256)",
+            format!("{NUM_THREADS}threads x {OPS_PER_BATCH}ops"),
+        ),
+        |b| {
+            let requests = Arc::new(HttpRequests::new());
+            let worker_req = Arc::clone(&requests);
+            let pool = BenchPool::new(NUM_THREADS, move |thread_id, total_ops| {
+                let mut local = worker_req.local();
+                let offset = thread_id as u64;
+                let mut idx = 0;
+                while idx + 256 <= total_ops {
+                    for _ in 0..256 {
+                        match (offset + idx) % 4 {
+                            0 => local.get.add(black_box(1)),
+                            1 => local.post.add(black_box(1)),
+                            2 => local.put.add(black_box(1)),
+                            _ => local.delete.add(black_box(1)),
+                        }
+                        idx += 1;
+                    }
+                    local.flush();
+                }
+                while idx < total_ops {
+                    match (offset + idx) % 4 {
+                        0 => local.get.add(black_box(1)),
+                        1 => local.post.add(black_box(1)),
+                        2 => local.put.add(black_box(1)),
+                        _ => local.delete.add(black_box(1)),
+                    }
+                    idx += 1;
+                }
+                local.flush();
+            });
+
+            b.iter_custom(|iters| {
+                let elapsed = pool.run_batch(iters);
+                black_box(requests.total());
+                elapsed
+            });
+        },
+    );
+
+    group.bench_function(
+        BenchmarkId::new(
             "contatori labeled_group!",
             format!("{NUM_THREADS}threads x {OPS_PER_BATCH}ops"),
         ),
@@ -195,6 +239,38 @@ fn bench_single_label_high_contention(c: &mut Criterion) {
 
     group.bench_function(
         BenchmarkId::new(
+            "contatori Local (same label, batch=256)",
+            format!("{NUM_THREADS}threads x {OPS_PER_BATCH}ops"),
+        ),
+        |b| {
+            let requests = Arc::new(HttpRequests::new());
+            let worker_req = Arc::clone(&requests);
+            let pool = BenchPool::new(NUM_THREADS, move |_, total_ops| {
+                let mut local = worker_req.local();
+                let mut remaining = total_ops;
+                while remaining >= 256 {
+                    for _ in 0..256 {
+                        local.get.add(black_box(1));
+                    }
+                    local.flush();
+                    remaining -= 256;
+                }
+                for _ in 0..remaining {
+                    local.get.add(black_box(1));
+                }
+                local.flush();
+            });
+
+            b.iter_custom(|iters| {
+                let elapsed = pool.run_batch(iters);
+                black_box(requests.get.value());
+                elapsed
+            });
+        },
+    );
+
+    group.bench_function(
+        BenchmarkId::new(
             "contatori (same label)",
             format!("{NUM_THREADS}threads x {OPS_PER_BATCH}ops"),
         ),
@@ -240,6 +316,38 @@ fn bench_single_label_high_contention(c: &mut Criterion) {
 fn bench_simple_counter(c: &mut Criterion) {
     let mut group = c.benchmark_group("simple_counter");
     group.throughput(Throughput::Elements(NUM_THREADS as u64 * OPS_PER_BATCH));
+
+    group.bench_function(
+        BenchmarkId::new(
+            "contatori Local<Monotone> (batch=256)",
+            format!("{NUM_THREADS}threads x {OPS_PER_BATCH}ops"),
+        ),
+        |b| {
+            let counter = Arc::new(Monotone::new());
+            let worker_counter = Arc::clone(&counter);
+            let pool = BenchPool::new(NUM_THREADS, move |_, total_ops| {
+                let mut local = worker_counter.local();
+                let mut remaining = total_ops;
+                while remaining >= 256 {
+                    for _ in 0..256 {
+                        local.add(black_box(1));
+                    }
+                    local.flush();
+                    remaining -= 256;
+                }
+                for _ in 0..remaining {
+                    local.add(black_box(1));
+                }
+                local.flush();
+            });
+
+            b.iter_custom(|iters| {
+                let elapsed = pool.run_batch(iters);
+                black_box(counter.value());
+                elapsed
+            });
+        },
+    );
 
     group.bench_function(
         BenchmarkId::new(

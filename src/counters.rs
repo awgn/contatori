@@ -417,6 +417,31 @@ pub mod sealed {
             });
         }
     }
+
+    /// Internal trait for counters and labeled groups that support thread-local batching
+    /// via [`Local`](crate::adapters::Local).
+    pub trait Batchable {
+        /// Thread-local accumulator state.
+        type Acc<'a>
+        where
+            Self: 'a;
+
+        /// Creates a fresh empty accumulator for `self`.
+        fn new_acc(&self) -> Self::Acc<'_>;
+
+        /// Returns `true` if `acc` holds unflushed updates.
+        fn has_pending_acc(acc: &Self::Acc<'_>) -> bool;
+
+        /// Flushes any pending updates in `acc` into `self` and resets `acc` to empty.
+        fn flush_acc(&self, acc: &mut Self::Acc<'_>);
+
+        /// Resets `acc` to empty without flushing to `self`.
+        fn discard_acc(acc: &mut Self::Acc<'_>);
+    }
+
+    /// Marker subtrait for [`labeled_group!`](crate::labeled_group) structs whose
+    /// [`Local`](crate::adapters::Local) wrapper dereferences to per-label local proxies.
+    pub trait BatchableGroup: Batchable {}
 }
 
 #[cfg(test)]

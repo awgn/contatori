@@ -117,6 +117,17 @@ impl<const SHARDS: usize> Unsigned<SHARDS> {
         self.local_slot().load(Ordering::Relaxed)
     }
 
+    /// Creates a local batch accumulator for this counter.
+    ///
+    /// Updates on the returned [`Local`](crate::adapters::Local) proxy are buffered
+    /// in non-atomic memory and flushed to this counter on [`Local::flush()`](crate::adapters::Local::flush)
+    /// or when dropped.
+    #[must_use]
+    #[inline]
+    pub const fn local(&self) -> crate::adapters::Local<'_, Self> {
+        crate::adapters::Local::__from_parts(self, 0)
+    }
+
     /// Computes the total value across all shards using wrapping addition.
     #[inline]
     fn total_value(&self) -> u64 {

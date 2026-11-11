@@ -13,7 +13,7 @@ use crate::counters::{
     CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
 };
 
-const UNOBSERVED: u64 = 0;
+pub(crate) const UNOBSERVED: u64 = 0;
 
 /// A high-performance maximum value tracker using sharded atomic storage.
 ///
@@ -72,12 +72,12 @@ impl<const SHARDS: usize> Maximum<SHARDS> {
     }
 
     #[inline]
-    const fn encode(value: u64) -> u64 {
+    pub(crate) const fn encode(value: u64) -> u64 {
         value.saturating_add(1)
     }
 
     #[inline]
-    const fn decode(raw: u64) -> Option<u64> {
+    pub(crate) const fn decode(raw: u64) -> Option<u64> {
         if raw == UNOBSERVED {
             None
         } else {
@@ -90,10 +90,8 @@ impl<const SHARDS: usize> Maximum<SHARDS> {
         &self.components[thread_slot_index::<SHARDS>()]
     }
 
-    /// Observes a value and updates the current thread's shard maximum if greater.
     #[inline]
-    pub fn observe(&self, value: u64) {
-        let encoded = Self::encode(value);
+    pub(crate) fn observe_encoded(&self, encoded: u64) {
         let counter = self.local_slot();
         let mut current = counter.load(Ordering::Relaxed);
         while encoded > current {
@@ -107,6 +105,23 @@ impl<const SHARDS: usize> Maximum<SHARDS> {
                 Err(actual) => current = actual,
             }
         }
+    }
+
+    /// Observes a value and updates the current thread's shard maximum if greater.
+    #[inline]
+    pub fn observe(&self, value: u64) {
+        self.observe_encoded(Self::encode(value));
+    }
+
+    /// Creates a local batch accumulator for this tracker.
+    ///
+    /// Observations on the returned [`Local`](crate::adapters::Local) proxy compute
+    /// the batch maximum in non-atomic memory and flush once on
+    /// [`Local::flush()`](crate::adapters::Local::flush) or when dropped.
+    #[must_use]
+    #[inline]
+    pub const fn local(&self) -> crate::adapters::Local<'_, Self> {
+        crate::adapters::Local::__from_parts(self, UNOBSERVED)
     }
 
     /// Sets the value of the current thread's shard directly.

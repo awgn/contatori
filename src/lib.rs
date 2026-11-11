@@ -8,7 +8,7 @@ pub mod observers;
 pub mod snapshot;
 
 // Ergonomic root re-exports
-pub use adapters::Resettable;
+pub use adapters::{Batchable, Local, Resettable};
 pub use counters::{
     CounterValue, DEFAULT_SHARDS, MetricKind, Observable, ObservableEntry, average::Average,
     maximum::Maximum, minimum::Minimum, monotone::Monotone, rate::Rate, signed::Signed,
@@ -17,7 +17,7 @@ pub use counters::{
 
 /// Convenience prelude re-exporting all counter types, adapters, and core traits.
 pub mod prelude {
-    pub use crate::adapters::Resettable;
+    pub use crate::adapters::{Batchable, Local, Resettable};
     pub use crate::counters::{
         CounterValue, DEFAULT_SHARDS, MetricKind, Observable, ObservableEntry, average::Average,
         maximum::Maximum, minimum::Minimum, monotone::Monotone, rate::Rate, signed::Signed,

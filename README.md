@@ -19,9 +19,9 @@ In multi-threaded applications, updating a single shared atomic variable from ma
 
 ## Performance Benchmark
 
-### Single Counter: Sharded vs `AtomicU64`
+### Single Counter: `Local` Batch vs Sharded vs `AtomicU64`
 
-Benchmarked with 8 persistent worker threads (`8 threads × 100,000 increments` per batch):
+Benchmarked with 8 persistent worker threads (`8 threads × 100,000 increments`):
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -29,22 +29,26 @@ Benchmarked with 8 persistent worker threads (`8 threads × 100,000 increments` 
 │                   (8 threads × 100,000 increments)                          │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  AtomicU64 (single)     ████████████████████████████████████████  30.74 ms  │
-│                         (26.03 Melem/s)                                     │
+│  AtomicU64 (single)     ████████████████████████████████████████  22.10 ms  │
+│                         (36.20 Melem/s)                                     │
 │                                                                             │
-│  Unsigned (sharded)     ▏                                         0.224 ms  │
-│                         (3.58 Gelem/s)                                      │
+│  Unsigned (sharded)     ▍                                         0.221 ms  │
+│                         (3.61 Gelem/s)                                      │
+│                                                                             │
+│  Local<Unsigned>        ▏                                         0.023 ms  │
+│  (batch = 256)          (35.08 Gelem/s — ~0.23 ns/op per core!)             │
 │                                                                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  Speedup: ~137x faster                                                      │
+│  Sharded vs AtomicU64:  ~100x–137x faster                                   │
+│  Local vs Sharded:       ~9.7x faster  (~1,000x+ vs single AtomicU64)       │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Contatori vs OpenTelemetry Counters
 
-Benchmarked with 8 persistent worker threads (`8 threads × 100,000 increments` per batch):
+Benchmarked with 8 persistent worker threads (`8 threads × 100,000 increments`):
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -53,18 +57,21 @@ Benchmarked with 8 persistent worker threads (`8 threads × 100,000 increments` 
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  Simple counter (no labels):                                                │
 │  OpenTelemetry Counter  ████████████████████████████████████████   30.33 ms │
-│  contatori Monotone     ▏                                         0.227 ms  │
-│  Speedup: ~134x faster  (3.53 Gelem/s vs 26.38 Melem/s)                     │
+│  contatori Monotone     ▍                                         0.227 ms  │
+│  Local<Monotone> (b256) ▏                                         0.024 ms  │
+│  Speedup: ~134x (sharded) / ~1,262x (Local batch, 33.31 Gelem/s)            │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  Labeled counters (rotating GET/POST/PUT/DELETE):                           │
 │  OpenTelemetry Counter  ████████████████████████████████████████  280.64 ms │
-│  cont. labeled_group!   ▏                                         0.166 ms  │
-│  Speedup: ~1,691x faster (4.82 Gelem/s vs 2.85 Melem/s)                     │
+│  cont. labeled_group!   ▍                                         0.166 ms  │
+│  Local<Group> (b256)    ▏                                         0.120 ms  │
+│  Speedup: ~1,691x (sharded) / ~2,330x (Local batch, 6.64 Gelem/s)           │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  High contention (all threads same label):                                  │
 │  OpenTelemetry Counter  ████████████████████████████████████████  281.48 ms │
-│  cont. labeled_group!   ▏                                         0.226 ms  │
-│  Speedup: ~1,245x faster (3.54 Gelem/s vs 2.84 Melem/s)                     │
+│  cont. labeled_group!   ▍                                         0.226 ms  │
+│  Local<Group> (b256)    ▏                                         0.022 ms  │
+│  Speedup: ~1,245x (sharded) / ~13,087x (Local batch, 37.20 Gelem/s)         │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -84,7 +91,7 @@ Benchmarked with 8 persistent worker threads (`8 threads × 100,000 increments` 
 
 ```toml
 [dependencies]
-contatori = "0.8"
+contatori = "0.9"
 ```
 
 ### Basic Usage
@@ -185,6 +192,46 @@ assert_eq!(REQ.total().as_u64(), 15);
 RESP.get_200.add(9);
 RESP.get_404.incr();
 assert_eq!(RESP.expand()[0].labels, &[("method", "GET"), ("status", "200")]);
+```
+
+### Local Batch Accumulator (`Local<'a, C>`)
+
+For batch-oriented pipelines (packet processing, stream ingestion, bulk workers), [`Local`] buffers updates in plain non-atomic memory (register-promoted, zero TLS lookups, zero atomic instructions per event) and flushes the delta to the global sharded counter **once per batch** via `.flush()` or automatically on `Drop`:
+
+```rust
+use contatori::{Average, Monotone, Observable, labeled_group};
+
+static PACKETS: Monotone = Monotone::new().with_name("rx_packets_total");
+static LATENCY: Average = Average::new().with_name("batch_latency_ns");
+
+labeled_group!(
+    ProtoPackets,
+    "rx_proto_packets_total",
+    "proto",
+    tcp: "tcp": Monotone,
+    udp: "udp": Monotone,
+    icmp: "icmp": Monotone,
+);
+
+static BY_PROTO: ProtoPackets = ProtoPackets::new();
+
+// Single counters and entire labeled groups both expose `.local()`:
+{
+    let mut pkts = PACKETS.local();
+    let mut lat = LATENCY.local();
+    let mut proto = BY_PROTO.local();
+
+    for i in 0..64_u64 {
+        pkts.incr();
+        lat.observe(100 + i);
+        proto.tcp.incr();
+    }
+    // `proto.icmp` was never touched, so it performs zero atomic ops on flush/Drop!
+}
+
+assert_eq!(PACKETS.value().as_u64(), 64);
+assert_eq!(BY_PROTO.tcp.value().as_u64(), 64);
+assert_eq!(BY_PROTO.icmp.value().as_u64(), 0);
 ```
 
 ### Resettable Counters & Groups

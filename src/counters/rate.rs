@@ -147,6 +147,18 @@ impl<const SHARDS: usize> Rate<SHARDS> {
         self.local_slot().load(Ordering::Relaxed)
     }
 
+    /// Creates a local batch accumulator for this rate counter.
+    ///
+    /// Increments on the returned [`Local`](crate::adapters::Local) proxy are buffered
+    /// in non-atomic memory and flushed to this counter on [`Local::flush()`](crate::adapters::Local::flush)
+    /// or when dropped. Call [`flush()`](crate::adapters::Local::flush) at the end of each batch
+    /// so rate samples stay timely.
+    #[must_use]
+    #[inline]
+    pub const fn local(&self) -> crate::adapters::Local<'_, Self> {
+        crate::adapters::Local::__from_parts(self, 0)
+    }
+
     /// Computes the cumulative count across all shards.
     #[must_use]
     #[inline]

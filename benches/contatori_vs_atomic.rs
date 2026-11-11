@@ -97,6 +97,38 @@ fn bench_unsigned_counter(c: &mut Criterion) {
 
     group.bench_function(
         BenchmarkId::new(
+            "Local<Unsigned> (batch=256)",
+            format!("{NUM_THREADS}threads x {OPS_PER_BATCH}ops"),
+        ),
+        |b| {
+            let counter = Arc::new(Unsigned::new());
+            let worker_counter = Arc::clone(&counter);
+            let pool = BenchPool::new(NUM_THREADS, move |_, total_ops| {
+                let mut local = worker_counter.local();
+                let mut remaining = total_ops;
+                while remaining >= 256 {
+                    for _ in 0..256 {
+                        local.add(black_box(1));
+                    }
+                    local.flush();
+                    remaining -= 256;
+                }
+                for _ in 0..remaining {
+                    local.add(black_box(1));
+                }
+                local.flush();
+            });
+
+            b.iter_custom(|iters| {
+                let elapsed = pool.run_batch(iters);
+                black_box(counter.value());
+                elapsed
+            });
+        },
+    );
+
+    group.bench_function(
+        BenchmarkId::new(
             "Unsigned (sharded AtomicU64)",
             format!("{NUM_THREADS}threads x {OPS_PER_BATCH}ops"),
         ),

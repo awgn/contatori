@@ -126,6 +126,17 @@ impl<const SHARDS: usize> Average<SHARDS> {
         self.local_slot().count.fetch_sub(1, Ordering::Relaxed);
     }
 
+    /// Creates a local batch accumulator for this average tracker.
+    ///
+    /// Observations on the returned [`Local`](crate::adapters::Local) proxy accumulate
+    /// `(sum, count)` in non-atomic memory and flush once on
+    /// [`Local::flush()`](crate::adapters::Local::flush) or when dropped.
+    #[must_use]
+    #[inline]
+    pub const fn local(&self) -> crate::adapters::Local<'_, Self> {
+        crate::adapters::Local::__from_parts(self, (0, 0))
+    }
+
     /// Returns the total sum across all shards (using wrapping 64-bit addition).
     #[must_use]
     #[inline]

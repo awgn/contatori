@@ -277,6 +277,64 @@ macro_rules! labeled_group {
                 Self::new()
             }
         }
+
+        const _: () = {
+            #[derive(::core::fmt::Debug)]
+            pub struct LocalFields<'a> {
+                $( pub $field: $crate::adapters::Local<'a, $ty>, )+
+            }
+
+            #[allow(dead_code)]
+            impl $name {
+                /// Creates a local batch accumulator for all sub-counters in this group.
+                ///
+                /// Updates to individual fields (e.g., `local.get.incr()`) happen in plain
+                /// non-atomic memory and are flushed to the global sub-counters when
+                /// [`Local::flush()`]($crate::adapters::Local::flush) is called or when dropped.
+                /// Untouched fields perform zero atomic operations on flush.
+                #[must_use]
+                #[inline]
+                pub const fn local(&self) -> $crate::adapters::Local<'_, Self> {
+                    $crate::adapters::Local::__from_parts(
+                        self,
+                        LocalFields {
+                            $( $field: self.$field.local(), )+
+                        },
+                    )
+                }
+            }
+
+            impl $crate::counters::sealed::Batchable for $name {
+                type Acc<'a>
+                    = LocalFields<'a>
+                where
+                    Self: 'a;
+
+                #[inline]
+                fn new_acc(&self) -> Self::Acc<'_> {
+                    LocalFields {
+                        $( $field: $crate::adapters::Batchable::local(&self.$field), )+
+                    }
+                }
+
+                #[inline]
+                fn has_pending_acc(acc: &Self::Acc<'_>) -> bool {
+                    false $( || acc.$field.has_pending() )+
+                }
+
+                #[inline]
+                fn flush_acc(&self, acc: &mut Self::Acc<'_>) {
+                    $( acc.$field.flush(); )+
+                }
+
+                #[inline]
+                fn discard_acc(acc: &mut Self::Acc<'_>) {
+                    $( acc.$field.discard(); )+
+                }
+            }
+
+            impl $crate::counters::sealed::BatchableGroup for $name {}
+        };
     };
 }
 
