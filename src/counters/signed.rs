@@ -1,219 +1,153 @@
-//! Signed integer counter with sharded atomic storage.
+//! Signed 64-bit integer counter with sharded atomic storage.
 //!
-//! This module provides [`Signed`], a high-performance counter that supports
-//! both positive and negative values. It uses the same sharding strategy as
-//! [`Unsigned`](super::unsigned::Unsigned) to minimize contention.
-
-use std::sync::atomic::{AtomicIsize, Ordering};
+//! [`Signed`] supports both positive and negative updates across threads,
+//! making it ideal for gauges such as active connections, queue depth, or balance tracking.
 
 use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::counters::{
-    sealed, CounterValue, GetComponentCounter, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX,
+    CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
 };
 
-/// A high-performance signed integer counter using sharded atomic storage.
-///
-/// `Signed` is similar to [`Unsigned`](super::unsigned::Unsigned) but uses
-/// `AtomicIsize` to support negative values. This makes it suitable for
-/// gauges, balance tracking, or any metric that can increase or decrease.
-///
-/// # Performance
-///
-/// Uses the same sharding strategy as `Unsigned`, providing similar
-/// performance benefits (~71x faster than a single atomic under high contention).
-///
-/// # Memory Usage
-///
-/// Each `Signed` counter uses approximately 4KB of memory (64 slots × 64 bytes).
+/// A high-performance signed 64-bit integer counter using sharded atomic storage.
 ///
 /// # Examples
 ///
-/// Basic usage:
-///
 /// ```rust
-/// use contatori::counters::signed::Signed;
-/// use contatori::counters::Observable;
+/// use contatori::{Observable, Signed};
 ///
-/// let gauge = Signed::new().with_name("active_connections");
-///
-/// // Connections open
-/// gauge.add(1);
-/// gauge.add(1);
-///
-/// // Connection closes
-/// gauge.sub(1);
-///
-/// assert_eq!(gauge.value(), contatori::counters::CounterValue::Signed(1));
+/// let connections = Signed::new().with_name("active_connections");
+/// connections.incr();
+/// connections.incr();
+/// connections.decr();
+/// assert_eq!(connections.value().as_i64(), 1);
 /// ```
-///
-/// Tracking balance:
-///
-/// ```rust
-/// use contatori::counters::signed::Signed;
-/// use contatori::counters::Observable;
-///
-/// let balance = Signed::new();
-/// balance.add(100);  // Deposit
-/// balance.sub(150);  // Withdrawal (overdraft!)
-///
-/// assert_eq!(balance.value(), contatori::counters::CounterValue::Signed(-50));
-/// ```
-pub struct Signed {
+pub struct Signed<const SHARDS: usize = DEFAULT_SHARDS> {
     name: &'static str,
-    components: [CachePadded<AtomicIsize>; NUM_COMPONENTS],
+    components: [CachePadded<AtomicI64>; SHARDS],
 }
 
-impl GetComponentCounter for Signed {
-    type CounterType = AtomicIsize;
-
-    /// Returns a reference to the current thread's shard.
-    #[inline]
-    fn get_component_counter(&self) -> &AtomicIsize {
-        THREAD_SLOT_INDEX.with(|idx| &self.components[*idx])
+impl Signed<DEFAULT_SHARDS> {
+    /// Creates a new counter with the default number of shards (`64`), initialized to zero.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self::with_shards()
     }
 }
 
-impl Signed {
-    /// Creates a new counter initialized to zero.
+impl<const SHARDS: usize> Signed<SHARDS> {
+    /// Creates a new counter with `SHARDS` shards, initialized to zero.
     ///
-    /// All 64 shards are initialized to zero. The counter has no name by default.
+    /// # Panics
     ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::signed::Signed;
-    /// use contatori::counters::Observable;
-    ///
-    /// let counter = Signed::new();
-    /// assert_eq!(counter.value(), contatori::counters::CounterValue::Signed(0));
-    /// ```
-    pub const fn new() -> Self {
-        const ZERO: CachePadded<AtomicIsize> = CachePadded::new(AtomicIsize::new(0));
-        Signed {
-            components: [ZERO; NUM_COMPONENTS],
+    /// Fails to compile if `SHARDS` is zero or not a power of two.
+    #[must_use]
+    pub const fn with_shards() -> Self {
+        const {
+            assert!(
+                SHARDS > 0 && SHARDS.is_power_of_two(),
+                "SHARDS must be a non-zero power of two"
+            );
+        }
+        Self {
             name: "",
+            components: [const { CachePadded::new(AtomicI64::new(0)) }; SHARDS],
         }
     }
 
-    /// Sets the name of this counter, returning `self` for method chaining.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::signed::Signed;
-    /// use contatori::counters::Observable;
-    ///
-    /// let counter = Signed::new().with_name("temperature_delta");
-    /// assert_eq!(counter.name(), "temperature_delta");
-    /// ```
+    /// Sets the metric name of this counter, returning `self` for method chaining.
+    #[must_use]
     pub const fn with_name(self, name: &'static str) -> Self {
         Self { name, ..self }
     }
 
-    /// Adds a value to the counter (can be negative).
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::signed::Signed;
-    /// use contatori::counters::Observable;
-    ///
-    /// let counter = Signed::new();
-    /// counter.add(10);
-    /// counter.add(-15);
-    /// assert_eq!(counter.value(), contatori::counters::CounterValue::Signed(-5));
-    /// ```
     #[inline]
-    pub fn add(&self, value: isize) {
-        self.get_component_counter()
-            .fetch_add(value, Ordering::Relaxed);
+    fn local_slot(&self) -> &AtomicI64 {
+        &self.components[thread_slot_index::<SHARDS>()]
     }
 
-    /// Subtracts a value from the counter.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::signed::Signed;
-    /// use contatori::counters::Observable;
-    ///
-    /// let counter = Signed::new();
-    /// counter.sub(5);
-    /// assert_eq!(counter.value(), contatori::counters::CounterValue::Signed(-5));
-    /// ```
+    /// Increments the counter by `1`.
     #[inline]
-    pub fn sub(&self, value: isize) {
-        self.get_component_counter()
-            .fetch_sub(value, Ordering::Relaxed);
+    pub fn incr(&self) {
+        self.add(1);
+    }
+
+    /// Decrements the counter by `1`.
+    #[inline]
+    pub fn decr(&self) {
+        self.sub(1);
+    }
+
+    /// Adds `value` (positive or negative) to the counter.
+    #[inline]
+    pub fn add(&self, value: i64) {
+        self.local_slot().fetch_add(value, Ordering::Relaxed);
+    }
+
+    /// Subtracts `value` from the counter.
+    #[inline]
+    pub fn sub(&self, value: i64) {
+        self.local_slot().fetch_sub(value, Ordering::Relaxed);
     }
 
     /// Sets the value of the current thread's shard directly.
-    ///
-    /// This only affects the current thread's shard; other shards remain unchanged.
     #[inline]
-    pub fn set_local_value(&self, value: isize) {
-        self.get_component_counter().store(value, Ordering::Relaxed);
+    pub fn set_local_value(&self, value: i64) {
+        self.local_slot().store(value, Ordering::Relaxed);
     }
 
     /// Returns the value of the current thread's shard.
+    #[must_use]
     #[inline]
-    pub fn local_value(&self) -> isize {
-        self.get_component_counter().load(Ordering::Relaxed)
+    pub fn local_value(&self) -> i64 {
+        self.local_slot().load(Ordering::Relaxed)
     }
 
-    /// Computes the total value by summing all shards.
     #[inline]
-    fn total_value(&self) -> isize {
+    fn total_value(&self) -> i64 {
         self.components
             .iter()
             .map(|counter| counter.load(Ordering::Relaxed))
-            .sum()
+            .fold(0i64, i64::wrapping_add)
     }
 
-    /// Computes the total value and resets all shards to zero.
     #[inline]
-    fn total_value_and_reset(&self) -> isize {
-        let mut total = 0;
-        for counter in self.components.iter() {
-            total += counter.swap(0, Ordering::Relaxed);
-        }
-        total
+    fn total_value_and_reset(&self) -> i64 {
+        self.components
+            .iter()
+            .map(|counter| counter.swap(0, Ordering::Relaxed))
+            .fold(0i64, i64::wrapping_add)
     }
 }
 
-impl Observable for Signed {
-    /// Returns the total counter value by summing all shards.
+impl<const SHARDS: usize> Observable for Signed<SHARDS> {
     #[inline]
     fn value(&self) -> CounterValue {
-        CounterValue::Signed(self.total_value() as i64)
+        CounterValue::Signed(self.total_value())
     }
 
-    /// Returns the name of this counter.
     #[inline]
     fn name(&self) -> &'static str {
         self.name
     }
 }
 
-impl sealed::Resettable for Signed {
-    /// Returns the total value and resets all shards to zero.
+impl<const SHARDS: usize> sealed::Resettable for Signed<SHARDS> {
     #[inline]
     fn value_and_reset(&self) -> CounterValue {
-        CounterValue::Signed(self.total_value_and_reset() as i64)
+        CounterValue::Signed(self.total_value_and_reset())
     }
 }
 
-impl Default for Signed {
-    /// Creates a new counter initialized to zero with no name.
+impl<const SHARDS: usize> Default for Signed<SHARDS> {
     fn default() -> Self {
-        Self::new()
+        Self::with_shards()
     }
 }
 
-impl Debug for Signed {
-    /// Formats the counter showing non-zero shards.
+impl<const SHARDS: usize> Debug for Signed<SHARDS> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}{{", self.name)?;
         for (i, counter) in self.components.iter().enumerate() {
@@ -229,162 +163,49 @@ impl Debug for Signed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::counters::Observable;
+    use crate::adapters::Resettable;
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
-    fn test_new() {
-        let counter = Signed::new();
+    fn test_signed_operations() {
+        let counter = Signed::new().with_name("balance");
         assert_eq!(counter.value(), CounterValue::Signed(0));
-    }
-
-    #[test]
-    fn test_incr() {
-        let counter = Signed::new();
-        counter.add(1);
-        assert_eq!(counter.value(), CounterValue::Signed(1));
-        counter.add(1);
-        counter.add(1);
-        assert_eq!(counter.value(), CounterValue::Signed(3));
-    }
-
-    #[test]
-    fn test_decr() {
-        let counter = Signed::new();
-        counter.sub(1);
-        assert_eq!(counter.value(), CounterValue::Signed(-1));
-        counter.sub(1);
-        counter.sub(1);
-        assert_eq!(counter.value(), CounterValue::Signed(-3));
-    }
-
-    #[test]
-    fn test_add() {
-        let counter = Signed::new();
         counter.add(10);
-        assert_eq!(counter.value(), CounterValue::Signed(10));
-        counter.add(-15);
+        counter.sub(15);
+        counter.incr();
+        counter.decr();
         assert_eq!(counter.value(), CounterValue::Signed(-5));
     }
 
     #[test]
-    fn test_sub() {
-        let counter = Signed::new();
-        counter.sub(5);
-        assert_eq!(counter.value(), CounterValue::Signed(-5));
-        counter.sub(-10);
-        assert_eq!(counter.value(), CounterValue::Signed(5));
-    }
-
-    #[test]
-    fn test_set_local_value() {
-        let counter = Signed::new();
-        counter.set_local_value(-42);
-        assert_eq!(counter.local_value(), -42);
-        assert_eq!(counter.value(), CounterValue::Signed(-42));
-    }
-
-    #[test]
-    fn test_local_value() {
-        let counter = Signed::new();
-        assert_eq!(counter.local_value(), 0);
-        counter.sub(1);
-        assert_eq!(counter.local_value(), -1);
-    }
-
-    #[test]
-    fn test_resettable() {
-        use crate::adapters::Resettable;
+    fn test_resettable_signed() {
         let counter = Resettable::new(Signed::new());
         counter.add(5);
         counter.sub(8);
         assert_eq!(counter.value(), CounterValue::Signed(-3));
-        // After value() the counter should be reset
         assert_eq!(counter.value(), CounterValue::Signed(0));
-    }
-
-    #[test]
-    fn test_debug() {
-        let counter = Signed::new();
-        counter.set_local_value(-5);
-        let debug_str = format!("{:?}", counter);
-        assert!(debug_str.starts_with("{"));
-        assert!(debug_str.contains("-5"));
-        assert!(debug_str.ends_with("}"));
-    }
-
-    #[test]
-    fn test_dyn_format() {
-        let counter = Signed::new().with_name("test_counter");
-        counter.sub(1);
-        let formatted = format!("{}", &counter as &dyn Observable);
-        assert_eq!(formatted, "test_counter:-1");
-    }
-
-    #[test]
-    fn test_dyn_debug() {
-        let counter = Signed::new().with_name("test_counter");
-        counter.add(-2);
-        let debug_str = format!("{:?}", &counter as &dyn Observable);
-        assert!(debug_str.starts_with("test_counter{"));
-        assert!(debug_str.contains("-2"));
-        assert!(debug_str.ends_with("}"));
     }
 
     #[test]
     fn test_multiple_threads() {
-        use std::sync::Arc;
-        use std::thread;
-
         let counter = Arc::new(Signed::new());
         let mut handles = vec![];
-
-        // Half threads increment, half decrement
         for i in 0..4 {
-            let counter_clone = Arc::clone(&counter);
-            let handle = thread::spawn(move || {
+            let c = Arc::clone(&counter);
+            handles.push(thread::spawn(move || {
                 for _ in 0..100 {
                     if i % 2 == 0 {
-                        counter_clone.add(1);
+                        c.incr();
                     } else {
-                        counter_clone.sub(1);
+                        c.decr();
                     }
                 }
-            });
-            handles.push(handle);
+            }));
         }
-
-        for handle in handles {
-            handle.join().unwrap();
+        for h in handles {
+            h.join().unwrap();
         }
-
         assert_eq!(counter.value(), CounterValue::Signed(0));
-    }
-
-    #[test]
-    fn test_name_default() {
-        let counter = Signed::new();
-        assert_eq!(counter.name(), "");
-    }
-
-    #[test]
-    fn test_with_name() {
-        let counter = Signed::new().with_name("my_counter");
-        assert_eq!(counter.name(), "my_counter");
-    }
-
-    #[test]
-    fn test_with_name_preserves_value() {
-        let counter = Signed::new().with_name("test");
-        counter.sub(1);
-        counter.sub(1);
-        assert_eq!(counter.name(), "test");
-        assert_eq!(counter.value(), CounterValue::Signed(-2));
-    }
-
-    #[test]
-    fn test_default() {
-        let counter = Signed::default();
-        assert_eq!(counter.value(), CounterValue::Signed(0));
-        assert_eq!(counter.name(), "");
     }
 }

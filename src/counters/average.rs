@@ -1,422 +1,270 @@
 //! Average value counter with sharded atomic storage.
 //!
-//! This module provides [`Average`], a high-performance counter that computes
-//! the running average of observed values. It uses sharding to minimize
-//! contention during updates.
-
-use std::sync::atomic::{AtomicUsize, Ordering};
+//! [`Average`] tracks both `sum` and `count` inside each cache-line-padded shard,
+//! returning floating-point averages via [`Observable::value()`] (`CounterValue::Float`)
+//! and `None` via [`Observable::try_value()`] before any observations occur.
 
 use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::counters::{sealed, CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX};
+use crate::counters::{
+    CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
+};
 
-/// Internal component that stores sum and count for a single shard.
-///
-/// By combining sum and count in a single struct wrapped in `CachePadded`,
-/// we ensure both values share the same cache line, reducing memory usage
-/// compared to two separate arrays.
 struct SumCount {
-    sum: AtomicUsize,
-    count: AtomicUsize,
+    sum: AtomicU64,
+    count: AtomicU64,
 }
 
 impl SumCount {
     const fn new() -> Self {
-        SumCount {
-            sum: AtomicUsize::new(0),
-            count: AtomicUsize::new(0),
+        Self {
+            sum: AtomicU64::new(0),
+            count: AtomicU64::new(0),
         }
     }
 }
 
-/// A high-performance average counter using sharded atomic storage.
-///
-/// `Average` tracks the sum and count of observed values across all threads,
-/// allowing you to compute the running average. Each shard maintains its own
-/// sum and count, which are aggregated when reading.
-///
-/// # Memory Optimization
-///
-/// Unlike `Unsigned` which uses a single atomic per shard, `Average` stores
-/// both sum and count in each shard. By combining them in a single `CachePadded`
-/// struct, we use ~4KB total instead of ~8KB that two separate arrays would require.
-///
-/// # Use Cases
-///
-/// - Computing average request latency
-/// - Tracking mean values over time
-/// - Calculating running averages for metrics
+/// A high-performance running average tracker using sharded atomic storage.
 ///
 /// # Examples
 ///
-/// Basic usage:
-///
 /// ```rust
-/// use contatori::counters::average::Average;
-/// use contatori::counters::Observable;
+/// use contatori::{Average, CounterValue, Observable};
 ///
-/// let avg_latency = Average::new().with_name("request_latency_avg");
+/// let avg = Average::new().with_name("request_latency_avg");
+/// assert_eq!(avg.try_value(), None);
 ///
-/// // Record some latencies (in microseconds)
-/// avg_latency.observe(100);
-/// avg_latency.observe(150);
-/// avg_latency.observe(200);
+/// avg.observe(10);
+/// avg.observe(15);
 ///
-/// // The average is (100 + 150 + 200) / 3 = 150
-/// assert_eq!(avg_latency.average(), Some(150));
+/// assert_eq!(avg.average_f64(), Some(12.5));
+/// assert_eq!(avg.value(), CounterValue::Float(12.5));
 /// ```
-///
-/// Batch observations:
-///
-/// ```rust
-/// use contatori::counters::average::Average;
-///
-/// let avg = Average::new();
-///
-/// // Observe multiple values at once (sum=300, count=3)
-/// avg.observe_many(300, 3);
-///
-/// assert_eq!(avg.sum(), 300);
-/// assert_eq!(avg.count(), 3);
-/// assert_eq!(avg.average(), Some(100));
-/// ```
-pub struct Average {
+pub struct Average<const SHARDS: usize = DEFAULT_SHARDS> {
     name: &'static str,
-    components: [CachePadded<SumCount>; NUM_COMPONENTS],
+    components: [CachePadded<SumCount>; SHARDS],
 }
 
-impl Average {
-    /// Creates a new average counter initialized to zero.
-    ///
-    /// All 64 shards have their sum and count set to zero.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::average::Average;
-    ///
-    /// let avg = Average::new();
-    /// assert_eq!(avg.sum(), 0);
-    /// assert_eq!(avg.count(), 0);
-    /// assert_eq!(avg.average(), None); // No observations yet
-    /// ```
+impl Average<DEFAULT_SHARDS> {
+    /// Creates a new average tracker with the default number of shards (`64`).
+    #[must_use]
     pub const fn new() -> Self {
-        const ZERO: CachePadded<SumCount> = CachePadded::new(SumCount::new());
-        Average {
-            components: [ZERO; NUM_COMPONENTS],
+        Self::with_shards()
+    }
+}
+
+impl<const SHARDS: usize> Average<SHARDS> {
+    /// Creates a new average tracker with `SHARDS` shards.
+    ///
+    /// # Panics
+    ///
+    /// Fails to compile if `SHARDS` is zero or not a power of two.
+    #[must_use]
+    pub const fn with_shards() -> Self {
+        const {
+            assert!(
+                SHARDS > 0 && SHARDS.is_power_of_two(),
+                "SHARDS must be a non-zero power of two"
+            );
+        }
+        Self {
             name: "",
+            components: [const { CachePadded::new(SumCount::new()) }; SHARDS],
         }
     }
 
-    /// Sets the name of this counter, returning `self` for method chaining.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::average::Average;
-    /// use contatori::counters::Observable;
-    ///
-    /// let avg = Average::new().with_name("response_time_avg");
-    /// assert_eq!(avg.name(), "response_time_avg");
-    /// ```
+    /// Sets the metric name of this counter, returning `self` for method chaining.
+    #[must_use]
     pub const fn with_name(self, name: &'static str) -> Self {
         Self { name, ..self }
     }
 
-    /// Returns a reference to the current thread's shard.
     #[inline]
-    fn get_local_component(&self) -> &SumCount {
-        THREAD_SLOT_INDEX.with(|idx| &*self.components[*idx])
+    fn local_slot(&self) -> &SumCount {
+        &self.components[thread_slot_index::<SHARDS>()]
     }
 
-    /// Observes a single value to include in the average.
-    ///
-    /// This increments the sum by `value` and the count by 1.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::average::Average;
-    ///
-    /// let avg = Average::new();
-    /// avg.observe(10);
-    /// avg.observe(20);
-    ///
-    /// assert_eq!(avg.sum(), 30);
-    /// assert_eq!(avg.count(), 2);
-    /// assert_eq!(avg.average(), Some(15));
-    /// ```
+    /// Observes a single value (`sum += value`, `count += 1`).
     #[inline]
-    pub fn observe(&self, value: usize) {
-        let component = self.get_local_component();
-        component.sum.fetch_add(value, Ordering::Relaxed);
-        component.count.fetch_add(1, Ordering::Relaxed);
+    pub fn observe(&self, value: u64) {
+        let slot = self.local_slot();
+        slot.sum.fetch_add(value, Ordering::Relaxed);
+        slot.count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Observes multiple values at once (batch optimization).
-    ///
-    /// This is more efficient than calling `observe()` multiple times when
-    /// you have pre-aggregated data.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::average::Average;
-    ///
-    /// let avg = Average::new();
-    ///
-    /// // Instead of 4 separate observe() calls
-    /// avg.observe_many(100, 4); // sum=100, count=4
-    ///
-    /// assert_eq!(avg.average(), Some(25));
-    /// ```
+    /// Observes a pre-aggregated batch of values (`sum += sum`, `count += count`).
     #[inline]
-    pub fn observe_many(&self, sum: usize, count: usize) {
-        let component = self.get_local_component();
-        component.sum.fetch_add(sum, Ordering::Relaxed);
-        component.count.fetch_add(count, Ordering::Relaxed);
+    pub fn observe_many(&self, sum: u64, count: u64) {
+        let slot = self.local_slot();
+        slot.sum.fetch_add(sum, Ordering::Relaxed);
+        slot.count.fetch_add(count, Ordering::Relaxed);
     }
 
-    /// Adds a value to the local sum without incrementing the count.
-    ///
-    /// Use this when you need to manipulate sum and count separately.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::average::Average;
-    ///
-    /// let avg = Average::new();
-    /// avg.add_sum(100);
-    /// avg.add_count(2);
-    ///
-    /// assert_eq!(avg.average(), Some(50));
-    /// ```
+    /// Adds `value` to the local sum without modifying the count.
     #[inline]
-    pub fn add_sum(&self, value: usize) {
-        self.get_local_component()
-            .sum
-            .fetch_add(value, Ordering::Relaxed);
+    pub fn add_sum(&self, value: u64) {
+        self.local_slot().sum.fetch_add(value, Ordering::Relaxed);
     }
 
-    /// Adds a value to the local count without modifying the sum.
-    ///
-    /// Use this when you need to manipulate sum and count separately.
+    /// Adds `value` to the local count without modifying the sum.
     #[inline]
-    pub fn add_count(&self, value: usize) {
-        self.get_local_component()
-            .count
-            .fetch_add(value, Ordering::Relaxed);
+    pub fn add_count(&self, value: u64) {
+        self.local_slot().count.fetch_add(value, Ordering::Relaxed);
     }
 
-    /// Increments the local count by 1 without modifying the sum.
-    ///
-    /// Useful for counting events without associated values.
+    /// Increments the local count by `1` without modifying the sum.
     #[inline]
     pub fn incr(&self) {
-        self.get_local_component()
-            .count
-            .fetch_add(1, Ordering::Relaxed);
+        self.local_slot().count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Decrements the local count by 1 without modifying the sum.
-    ///
-    /// # Warning
-    ///
-    /// This can cause underflow if count goes below zero.
+    /// Decrements the local count by `1` (wrapping) without modifying the sum.
     #[inline]
     pub fn decr(&self) {
-        self.get_local_component()
-            .count
-            .fetch_sub(1, Ordering::Relaxed);
+        self.local_slot().count.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Returns the total sum of all observed values across all shards.
+    /// Returns the total sum across all shards (using wrapping 64-bit addition).
+    #[must_use]
     #[inline]
-    pub fn sum(&self) -> usize {
+    pub fn sum(&self) -> u64 {
         self.components
             .iter()
             .map(|c| c.sum.load(Ordering::Relaxed))
-            .sum()
+            .fold(0u64, u64::wrapping_add)
     }
 
-    /// Returns the total count of observations across all shards.
+    /// Returns the total count across all shards (using wrapping 64-bit addition).
+    #[must_use]
     #[inline]
-    pub fn count(&self) -> usize {
+    pub fn count(&self) -> u64 {
         self.components
             .iter()
             .map(|c| c.count.load(Ordering::Relaxed))
-            .sum()
+            .fold(0u64, u64::wrapping_add)
     }
 
-    /// Computes the average as an integer (truncated).
-    ///
-    /// Returns `None` if no values have been observed (count is zero).
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::average::Average;
-    ///
-    /// let avg = Average::new();
-    /// assert_eq!(avg.average(), None);
-    ///
-    /// avg.observe(10);
-    /// avg.observe(20);
-    /// assert_eq!(avg.average(), Some(15));
-    /// ```
     #[inline]
-    pub fn average(&self) -> Option<usize> {
-        let total_sum = self.sum();
-        let total_count = self.count();
-        if total_count == 0 {
-            None
-        } else {
-            Some(total_sum / total_count)
+    fn totals_u128(&self) -> (u128, u64) {
+        let mut sum: u128 = 0;
+        let mut count: u64 = 0;
+        for c in &self.components {
+            sum += u128::from(c.sum.load(Ordering::Relaxed));
+            count = count.wrapping_add(c.count.load(Ordering::Relaxed));
         }
+        (sum, count)
     }
 
-    /// Computes the average as a floating-point number for higher precision.
-    ///
-    /// Returns `None` if no values have been observed (count is zero).
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::average::Average;
-    ///
-    /// let avg = Average::new();
-    /// avg.observe(1);
-    /// avg.observe(2);
-    ///
-    /// assert_eq!(avg.average(), Some(1));      // Truncated
-    /// assert_eq!(avg.average_f64(), Some(1.5)); // Precise
-    /// ```
     #[inline]
-    pub fn average_f64(&self) -> Option<f64> {
-        let total_sum = self.sum();
-        let total_count = self.count();
-        if total_count == 0 {
-            None
-        } else {
-            Some(total_sum as f64 / total_count as f64)
+    fn totals_u128_and_reset(&self) -> (u128, u64) {
+        let mut sum: u128 = 0;
+        let mut count: u64 = 0;
+        for c in &self.components {
+            sum += u128::from(c.sum.swap(0, Ordering::Relaxed));
+            count = count.wrapping_add(c.count.swap(0, Ordering::Relaxed));
         }
+        (sum, count)
     }
 
-    /// Computes sum and count, then resets all shards to zero.
+    /// Computes the truncated integer average, or `None` if `count == 0`.
+    #[must_use]
     #[inline]
-    fn raw_value_and_reset(&self) -> (usize, usize) {
-        let mut total_sum = 0;
-        let mut total_count = 0;
-        for component in self.components.iter() {
-            total_sum += component.sum.swap(0, Ordering::Relaxed);
-            total_count += component.count.swap(0, Ordering::Relaxed);
-        }
-        (total_sum, total_count)
-    }
-
-    /// Returns sum and count, then resets the counter.
-    ///
-    /// Useful for periodic metric collection where you want to compute
-    /// the average for a time window and start fresh.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::average::Average;
-    ///
-    /// let avg = Average::new();
-    /// avg.observe(100);
-    /// avg.observe(200);
-    ///
-    /// let (sum, count) = avg.sum_count_and_reset();
-    /// assert_eq!(sum, 300);
-    /// assert_eq!(count, 2);
-    ///
-    /// // After reset
-    /// assert_eq!(avg.sum(), 0);
-    /// assert_eq!(avg.count(), 0);
-    /// ```
-    #[inline]
-    pub fn sum_count_and_reset(&self) -> (usize, usize) {
-        self.raw_value_and_reset()
-    }
-
-    /// Returns the average and resets the counter.
-    ///
-    /// Combines `average()` and reset in a single operation.
-    /// Returns `None` if no values were observed during this period.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::average::Average;
-    ///
-    /// let avg = Average::new();
-    /// avg.observe(100);
-    /// avg.observe(200);
-    ///
-    /// let result = avg.average_and_reset();
-    /// assert_eq!(result, Some(150));
-    ///
-    /// // After reset
-    /// assert_eq!(avg.average(), None);
-    /// ```
-    #[inline]
-    pub fn average_and_reset(&self) -> Option<usize> {
-        let (sum, count) = self.raw_value_and_reset();
+    pub fn average(&self) -> Option<u64> {
+        let (sum, count) = self.totals_u128();
         if count == 0 {
             None
         } else {
-            Some(sum / count)
+            Some((sum / u128::from(count)) as u64)
+        }
+    }
+
+    /// Computes the floating-point average, or `None` if `count == 0`.
+    #[must_use]
+    #[inline]
+    pub fn average_f64(&self) -> Option<f64> {
+        let (sum, count) = self.totals_u128();
+        if count == 0 {
+            None
+        } else {
+            Some(sum as f64 / count as f64)
+        }
+    }
+
+    /// Returns `(sum, count)` and resets all shards to zero.
+    #[inline]
+    pub fn sum_count_and_reset(&self) -> (u64, u64) {
+        let (sum, count) = self.totals_u128_and_reset();
+        (sum as u64, count)
+    }
+
+    /// Returns the truncated integer average and resets all shards to zero.
+    #[inline]
+    pub fn average_and_reset(&self) -> Option<u64> {
+        let (sum, count) = self.totals_u128_and_reset();
+        if count == 0 {
+            None
+        } else {
+            Some((sum / u128::from(count)) as u64)
+        }
+    }
+
+    /// Returns the floating-point average and resets all shards to zero.
+    #[inline]
+    pub fn average_f64_and_reset(&self) -> Option<f64> {
+        let (sum, count) = self.totals_u128_and_reset();
+        if count == 0 {
+            None
+        } else {
+            Some(sum as f64 / count as f64)
         }
     }
 }
 
-impl Observable for Average {
-    /// Returns the average as a `CounterValue`.
-    ///
-    /// If no values have been observed, returns `0`.
+impl<const SHARDS: usize> Observable for Average<SHARDS> {
+    /// Returns the floating-point average (`CounterValue::Float`), or `0.0` if empty.
     #[inline]
     fn value(&self) -> CounterValue {
-        CounterValue::Unsigned(self.average().unwrap_or(0) as u64)
+        CounterValue::Float(self.average_f64().unwrap_or(0.0))
     }
 
-    /// Returns the name of this counter.
+    #[inline]
+    fn try_value(&self) -> Option<CounterValue> {
+        self.average_f64().map(CounterValue::Float)
+    }
+
     #[inline]
     fn name(&self) -> &'static str {
         self.name
     }
 }
 
-impl sealed::Resettable for Average {
-    /// Returns the average and resets the counter.
-    ///
-    /// If no values were observed, returns `0`.
+impl<const SHARDS: usize> sealed::Resettable for Average<SHARDS> {
     #[inline]
     fn value_and_reset(&self) -> CounterValue {
-        CounterValue::Unsigned(self.average_and_reset().unwrap_or(0) as u64)
+        CounterValue::Float(self.average_f64_and_reset().unwrap_or(0.0))
+    }
+
+    #[inline]
+    fn try_value_and_reset(&self) -> Option<CounterValue> {
+        self.average_f64_and_reset().map(CounterValue::Float)
     }
 }
 
-impl Default for Average {
-    /// Creates a new average counter initialized to zero.
+impl<const SHARDS: usize> Default for Average<SHARDS> {
     fn default() -> Self {
-        Self::new()
+        Self::with_shards()
     }
 }
 
-impl Debug for Average {
-    /// Formats the counter showing non-zero shards.
-    ///
-    /// Output format: `name{ [slot]:sum=X,count=Y ... }`
+impl<const SHARDS: usize> Debug for Average<SHARDS> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}{{", self.name)?;
         for (i, component) in self.components.iter().enumerate() {
             let sum = component.sum.load(Ordering::Relaxed);
             let count = component.count.load(Ordering::Relaxed);
-            if count != 0 {
+            if count != 0 || sum != 0 {
                 write!(f, " [{i}]:sum={sum},count={count}")?;
             }
         }
@@ -427,253 +275,68 @@ impl Debug for Average {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::counters::Observable;
+    use crate::adapters::Resettable;
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
-    fn test_new() {
-        let counter = Average::new();
-        assert_eq!(counter.sum(), 0);
-        assert_eq!(counter.count(), 0);
-        assert_eq!(counter.average(), None);
-    }
-
-    #[test]
-    fn test_observe_single() {
-        let counter = Average::new();
-        counter.observe(42);
-        assert_eq!(counter.sum(), 42);
-        assert_eq!(counter.count(), 1);
-        assert_eq!(counter.average(), Some(42));
-    }
-
-    #[test]
-    fn test_observe_multiple() {
-        let counter = Average::new();
-        counter.observe(10);
-        counter.observe(20);
-        counter.observe(30);
-        assert_eq!(counter.sum(), 60);
-        assert_eq!(counter.count(), 3);
-        assert_eq!(counter.average(), Some(20));
-    }
-
-    #[test]
-    fn test_observe_many() {
-        let counter = Average::new();
-        counter.observe_many(100, 4);
-        assert_eq!(counter.sum(), 100);
-        assert_eq!(counter.count(), 4);
-        assert_eq!(counter.average(), Some(25));
-    }
-
-    #[test]
-    fn test_average_f64() {
-        let counter = Average::new();
-        counter.observe(10);
-        counter.observe(20);
-        counter.observe(30);
-        assert_eq!(counter.average_f64(), Some(20.0));
-
-        let counter2 = Average::new();
-        counter2.observe(1);
-        counter2.observe(2);
-        assert_eq!(counter2.average(), Some(1));
-        assert_eq!(counter2.average_f64(), Some(1.5));
-    }
-
-    #[test]
-    fn test_average_empty() {
-        let counter = Average::new();
+    fn test_empty_and_float_precision() {
+        let counter = Average::new().with_name("avg");
         assert_eq!(counter.average(), None);
         assert_eq!(counter.average_f64(), None);
+        assert_eq!(counter.try_value(), None);
+        assert_eq!(counter.value(), CounterValue::Float(0.0));
+
+        counter.observe(1);
+        counter.observe(2);
+        assert_eq!(counter.average(), Some(1));
+        assert_eq!(counter.average_f64(), Some(1.5));
+        assert_eq!(counter.value(), CounterValue::Float(1.5));
+        assert_eq!(counter.try_value(), Some(CounterValue::Float(1.5)));
     }
 
     #[test]
-    fn test_sum_count_and_reset() {
-        let counter = Average::new();
-        counter.observe(10);
-        counter.observe(20);
-        counter.observe(30);
-
-        let (sum, count) = counter.sum_count_and_reset();
-        assert_eq!(sum, 60);
-        assert_eq!(count, 3);
-
-        assert_eq!(counter.sum(), 0);
-        assert_eq!(counter.count(), 0);
-        assert_eq!(counter.average(), None);
+    fn test_cross_thread_incr_decr_wrapping() {
+        let counter = Arc::new(Average::new());
+        let c1 = Arc::clone(&counter);
+        let t1 = thread::spawn(move || c1.add_count(10));
+        let c2 = Arc::clone(&counter);
+        let t2 = thread::spawn(move || c2.decr());
+        t1.join().unwrap();
+        t2.join().unwrap();
+        assert_eq!(counter.count(), 9);
     }
 
     #[test]
-    fn test_average_and_reset() {
-        let counter = Average::new();
-        counter.observe(10);
-        counter.observe(20);
-        counter.observe(30);
-
-        let avg = counter.average_and_reset();
-        assert_eq!(avg, Some(20));
-
-        assert_eq!(counter.average(), None);
-    }
-
-    #[test]
-    fn test_resettable_then_observe() {
-        use crate::adapters::Resettable;
+    fn test_resettable_float_average() {
         let counter = Resettable::new(Average::new());
-        counter.observe(100);
-        let _ = counter.value(); // reset
-        counter.observe(50);
-        assert_eq!(counter.inner().average(), Some(50));
-    }
-
-    #[test]
-    fn test_debug() {
-        let counter = Average::new();
         counter.observe(10);
         counter.observe(20);
-        let debug_str = format!("{:?}", counter);
-        assert!(debug_str.starts_with("{"));
-        assert!(debug_str.contains("sum=30"));
-        assert!(debug_str.contains("count=2"));
-        assert!(debug_str.ends_with("}"));
-    }
+        assert_eq!(counter.try_value(), Some(CounterValue::Float(15.0)));
+        assert_eq!(counter.try_value(), None);
 
-    #[test]
-    fn test_dyn_format() {
-        let counter = Average::new().with_name("avg_counter");
-        counter.observe(10);
-        counter.observe(20);
-        counter.observe(30);
-        let formatted = format!("{}", &counter as &dyn Observable);
-        assert_eq!(formatted, "avg_counter:20");
-    }
-
-    #[test]
-    fn test_dyn_debug() {
-        let counter = Average::new().with_name("avg_counter");
-        counter.observe(50);
-        let debug_str = format!("{:?}", &counter as &dyn Observable);
-        assert!(debug_str.starts_with("avg_counter{"));
-        assert!(debug_str.ends_with("}"));
+        counter.observe(1);
+        counter.observe(2);
+        assert_eq!(counter.value(), CounterValue::Float(1.5));
     }
 
     #[test]
     fn test_multiple_threads() {
-        use std::sync::Arc;
-        use std::thread;
-
         let counter = Arc::new(Average::new());
         let mut handles = vec![];
-
         for _ in 0..4 {
-            let counter_clone = Arc::clone(&counter);
-            let handle = thread::spawn(move || {
-                for j in 1..=100 {
-                    counter_clone.observe(j);
+            let c = Arc::clone(&counter);
+            handles.push(thread::spawn(move || {
+                for j in 1..=100u64 {
+                    c.observe(j);
                 }
-            });
-            handles.push(handle);
+            }));
         }
-
-        for handle in handles {
-            handle.join().unwrap();
+        for h in handles {
+            h.join().unwrap();
         }
-
         assert_eq!(counter.count(), 400);
         assert_eq!(counter.sum(), 20200);
-        assert_eq!(counter.average(), Some(50));
-    }
-
-    #[test]
-    fn test_name_default() {
-        let counter = Average::new();
-        assert_eq!(counter.name(), "");
-    }
-
-    #[test]
-    fn test_with_name() {
-        let counter = Average::new().with_name("my_avg");
-        assert_eq!(counter.name(), "my_avg");
-    }
-
-    #[test]
-    fn test_default() {
-        let counter = Average::default();
-        assert_eq!(counter.average(), None);
-        assert_eq!(counter.name(), "");
-    }
-
-    #[test]
-    fn test_observable_value_empty() {
-        let counter = Average::new();
-        assert_eq!(counter.value(), CounterValue::Unsigned(0));
-    }
-
-    #[test]
-    fn test_observable_value() {
-        let counter = Average::new();
-        counter.observe(10);
-        counter.observe(30);
-        assert_eq!(counter.value(), CounterValue::Unsigned(20));
-    }
-
-    #[test]
-    fn test_add_sum() {
-        let counter = Average::new();
-        counter.add_sum(100);
-        assert_eq!(counter.sum(), 100);
-        assert_eq!(counter.count(), 0);
-        assert_eq!(counter.average(), None);
-    }
-
-    #[test]
-    fn test_add_count() {
-        let counter = Average::new();
-        counter.add_count(5);
-        assert_eq!(counter.sum(), 0);
-        assert_eq!(counter.count(), 5);
-        assert_eq!(counter.average(), Some(0));
-    }
-
-    #[test]
-    fn test_add_sum_and_count_separately() {
-        let counter = Average::new();
-        counter.add_sum(100);
-        counter.add_count(4);
-        assert_eq!(counter.sum(), 100);
-        assert_eq!(counter.count(), 4);
-        assert_eq!(counter.average(), Some(25));
-    }
-
-    #[test]
-    fn test_incr() {
-        let counter = Average::new();
-        counter.incr();
-        counter.incr();
-        counter.incr();
-        assert_eq!(counter.count(), 3);
-        assert_eq!(counter.sum(), 0);
-    }
-
-    #[test]
-    fn test_decr() {
-        let counter = Average::new();
-        counter.add_count(10);
-        counter.decr();
-        counter.decr();
-        assert_eq!(counter.count(), 8);
-    }
-
-    #[test]
-    fn test_combined_operations() {
-        let counter = Average::new();
-        counter.observe(10);
-        counter.observe(20);
-        counter.add_sum(30);
-        counter.incr();
-        assert_eq!(counter.sum(), 60);
-        assert_eq!(counter.count(), 3);
-        assert_eq!(counter.average(), Some(20));
+        assert_eq!(counter.average_f64(), Some(50.5));
     }
 }

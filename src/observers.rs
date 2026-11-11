@@ -4,12 +4,12 @@
 //!
 //! - [`table`] - Pretty-print counters as tables using the `tabled` crate
 //! - [`json`] - Serialize counters to JSON format
-//! - [`prometheus`] - Export counters in Prometheus exposition format
+//! - [`prometheus`] - Export counters in Prometheus exposition format or as a `Collector`
 //! - [`opentelemetry`] - Export counters via OpenTelemetry
 //!
 //! # Unified Error Handling
 //!
-//! All observers use a unified [`ObserverError`] type, allowing you to switch
+//! Fallible observers share a unified [`ObserverError`] type, allowing you to switch
 //! between observers without changing error handling code.
 //!
 //! # Feature Flags
@@ -24,34 +24,39 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
-//! use contatori::counters::Observable;
-//! use contatori::counters::unsigned::Unsigned;
-//! use contatori::observers::{Result, ObserverError};
+//! ```rust
+//! use contatori::prelude::*;
+//! use contatori::observers::Result;
 //!
-//! static REQUESTS: Unsigned = Unsigned::new().with_name("requests");
-//! static ERRORS: Unsigned = Unsigned::new().with_name("errors");
+//! static REQUESTS: Monotone = Monotone::new().with_name("requests_total");
+//! static ERRORS: Monotone = Monotone::new().with_name("errors_total");
 //!
 //! fn export_metrics() -> Result<()> {
 //!     let counters: &[&'static dyn Observable] = &[&REQUESTS, &ERRORS];
 //!
+//!     #[cfg(feature = "json")]
+//!     {
+//!         use contatori::observers::json::JsonObserver;
+//!         let json = JsonObserver::new().render(counters.iter().copied())?;
+//!         assert!(!json.is_empty());
+//!     }
+//!
 //!     #[cfg(feature = "prometheus")]
 //!     {
 //!         use contatori::observers::prometheus::PrometheusObserver;
-//!         let observer = PrometheusObserver::new();
-//!         let output = observer.render(counters.iter().copied())?;
-//!         println!("{}", output);
+//!         let output = PrometheusObserver::new().render(counters.iter().copied())?;
+//!         assert!(output.contains("requests_total"));
 //!     }
 //!
 //!     #[cfg(feature = "opentelemetry")]
 //!     {
 //!         use contatori::observers::opentelemetry::OtelObserver;
-//!         let observer = OtelObserver::new("myapp");
-//!         observer.register(counters)?;
+//!         OtelObserver::new("myapp").register(counters)?;
 //!     }
 //!
 //!     Ok(())
 //! }
+//! # export_metrics().unwrap();
 //! ```
 
 mod error;

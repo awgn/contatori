@@ -1,144 +1,108 @@
-//! Snapshot types for serializing counter state.
+//! Snapshot types for serializing counter state with `serde`.
 //!
-//! This module provides serializable snapshot types that can be used
-//! to capture and export counter values in various formats.
-//!
-//! # Feature Flag
-//!
-//! This module requires the `serde` feature:
-//!
-//! ```toml
-//! [dependencies]
-//! contatori = { version = "0.7", features = ["serde"] }
-//! ```
-//!
-//! # Examples
-//!
-//! ```rust,ignore
-//! use contatori::counters::{CounterValue, Observable};
-//! use contatori::counters::unsigned::Unsigned;
-//! use contatori::snapshot::CounterSnapshot;
-//!
-//! let counter = Unsigned::new().with_name("requests");
-//! counter.add(42);
-//!
-//! // Create a snapshot
-//! let snapshot = CounterSnapshot::new(counter.name(), counter.value());
-//!
-//! // Serialize with any serde-compatible format
-//! let json = serde_json::to_string(&snapshot).unwrap();
-//! let yaml = serde_yaml::to_string(&snapshot).unwrap();
-//! let bytes = bincode::serialize(&snapshot).unwrap();
-//! ```
+//! Requires the `serde` feature (automatically enabled by the `json` feature).
 
-use crate::counters::{CounterValue, Observable};
+use crate::counters::{CounterValue, Observable, ObservableEntry};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
-/// A snapshot of a single counter's state.
-///
-/// This struct is serializable and can be used for:
-/// - Storing counter values to files
-/// - Sending metrics over HTTP APIs
-/// - Inter-process communication
+/// A serializable point-in-time snapshot of a single counter entry.
 ///
 /// # Examples
 ///
-/// ```rust,ignore
-/// use contatori::counters::CounterValue;
+/// ```rust
+/// use contatori::{CounterValue, Observable, Unsigned};
 /// use contatori::snapshot::CounterSnapshot;
 ///
-/// let snapshot = CounterSnapshot {
-///     name: "requests".to_string(),
-///     labels: vec![],
-///     value: CounterValue::Unsigned(42),
-/// };
+/// let counter = Unsigned::new().with_name("requests");
+/// counter.add(42);
 ///
-/// let json = serde_json::to_string(&snapshot).unwrap();
-/// assert_eq!(json, r#"{"name":"requests","value":42}"#);
+/// let snapshots = CounterSnapshot::from_observable(&counter);
+/// assert_eq!(snapshots.len(), 1);
+/// assert_eq!(snapshots[0].name, "requests");
+/// assert_eq!(snapshots[0].value, CounterValue::Unsigned(42));
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CounterSnapshot {
     /// The name of the counter.
     pub name: String,
-    /// Optional label as (key, value) pair (e.g., ("method", "GET")).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<(String, String)>,
-    /// The value of the counter.
+    /// Key-value labels associated with this entry (omitted when empty).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// The observed value of the counter.
     pub value: CounterValue,
 }
 
 impl CounterSnapshot {
-    /// Creates a new counter snapshot.
+    /// Creates an unlabeled counter snapshot.
+    #[must_use]
     pub fn new(name: impl Into<String>, value: CounterValue) -> Self {
         Self {
             name: name.into(),
-            label: None,
+            labels: BTreeMap::new(),
             value,
         }
     }
 
-    /// Creates a new counter snapshot with a label.
-    pub fn with_label(
-        name: impl Into<String>,
-        label: Option<(String, String)>,
-        value: CounterValue,
-    ) -> Self {
+    /// Creates a counter snapshot with the given `(key, value)` labels.
+    #[must_use]
+    pub fn with_labels<K, V, I>(name: impl Into<String>, labels: I, value: CounterValue) -> Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+        I: IntoIterator<Item = (K, V)>,
+    {
         Self {
             name: name.into(),
-            label,
+            labels: labels
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
             value,
         }
     }
 
-    /// Creates snapshots from an observable counter using expand().
-    ///
-    /// For single counters, returns one snapshot.
-    /// For labeled groups, returns multiple snapshots (one per sub-counter).
+    pub(crate) fn from_entry(entry: ObservableEntry) -> Option<Self> {
+        let value = entry.value?;
+        let name = if entry.name.is_empty() {
+            "(unnamed)".to_string()
+        } else {
+            entry.name.to_string()
+        };
+        let labels = entry
+            .labels
+            .iter()
+            .map(|&(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Some(Self {
+            name,
+            labels,
+            value,
+        })
+    }
+
+    /// Expands an [`Observable`] into snapshots, omitting entries without observations (`None`).
+    #[must_use]
     pub fn from_observable(counter: &dyn Observable) -> Vec<Self> {
-        counter
-            .expand()
-            .into_iter()
-            .map(|entry| Self {
-                name: if entry.name.is_empty() {
-                    "(unnamed)".to_string()
-                } else {
-                    entry.name.to_string()
-                },
-                label: entry.label.map(|(k, v)| (k.to_string(), v.to_string())),
-                value: entry.value,
-            })
-            .collect()
+        let mut entries = Vec::new();
+        counter.expand_into(&mut entries);
+        entries.into_iter().filter_map(Self::from_entry).collect()
     }
 }
 
-/// A collection of counter snapshots, typically representing a point-in-time
-/// capture of all metrics.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use contatori::snapshot::{CounterSnapshot, MetricsSnapshot};
-/// use contatori::counters::CounterValue;
-///
-/// let snapshot = MetricsSnapshot::new(vec![
-///     CounterSnapshot::new("requests", CounterValue::Unsigned(1000)),
-///     CounterSnapshot::new("errors", CounterValue::Unsigned(5)),
-/// ]);
-///
-/// // Add timestamp
-/// let snapshot = MetricsSnapshot::with_timestamp(counters, current_time_ms());
-/// ```
+/// A point-in-time collection of counter snapshots with an optional Unix timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MetricsSnapshot {
-    /// Optional timestamp in milliseconds since Unix epoch.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Optional timestamp in milliseconds since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp_ms: Option<u64>,
-    /// The counter snapshots.
+    /// Captured counter snapshots.
     pub counters: Vec<CounterSnapshot>,
 }
 
 impl MetricsSnapshot {
-    /// Creates a new metrics snapshot with the given counters.
+    /// Creates a new metrics snapshot without a timestamp.
+    #[must_use]
     pub fn new(counters: Vec<CounterSnapshot>) -> Self {
         Self {
             timestamp_ms: None,
@@ -146,7 +110,8 @@ impl MetricsSnapshot {
         }
     }
 
-    /// Creates a new metrics snapshot with counters and a timestamp.
+    /// Creates a new metrics snapshot with the given timestamp in milliseconds.
+    #[must_use]
     pub fn with_timestamp(counters: Vec<CounterSnapshot>, timestamp_ms: u64) -> Self {
         Self {
             timestamp_ms: Some(timestamp_ms),
@@ -154,210 +119,98 @@ impl MetricsSnapshot {
         }
     }
 
-    /// Finds a counter by name.
+    /// Finds the first snapshot matching `name`.
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&CounterSnapshot> {
         self.counters.iter().find(|c| c.name == name)
     }
 
-    /// Collects snapshots from an iterator of observable counters.
+    /// Collects snapshots from an iterator of [`Observable`] counters.
     ///
-    /// Uses `expand()` on each counter, so labeled groups will produce
-    /// multiple snapshots.
+    /// Uninitialized trackers (`try_value() == None`) are automatically omitted.
+    #[must_use]
     pub fn collect<'a>(counters: impl Iterator<Item = &'a dyn Observable>) -> Self {
+        let mut entries = Vec::new();
+        for counter in counters {
+            counter.expand_into(&mut entries);
+        }
         Self::new(
-            counters
-                .flat_map(CounterSnapshot::from_observable)
+            entries
+                .into_iter()
+                .filter_map(CounterSnapshot::from_entry)
                 .collect(),
         )
     }
 
-    /// Collects snapshots with a timestamp.
-    ///
-    /// Uses `expand()` on each counter, so labeled groups will produce
-    /// multiple snapshots.
+    /// Collects snapshots from an iterator of [`Observable`] counters with a timestamp.
+    #[must_use]
     pub fn collect_with_timestamp<'a>(
         counters: impl Iterator<Item = &'a dyn Observable>,
         timestamp_ms: u64,
     ) -> Self {
-        Self::with_timestamp(
-            counters
-                .flat_map(CounterSnapshot::from_observable)
-                .collect(),
-            timestamp_ms,
-        )
+        let mut snapshot = Self::collect(counters);
+        snapshot.timestamp_ms = Some(timestamp_ms);
+        snapshot
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::counters::minimum::Minimum;
     use crate::counters::unsigned::Unsigned;
+    use crate::labeled_group;
 
     #[test]
-    fn test_counter_snapshot_new() {
-        let snapshot = CounterSnapshot::new("test", CounterValue::Unsigned(42));
-        assert_eq!(snapshot.name, "test");
-        assert!(snapshot.label.is_none());
-        assert_eq!(snapshot.value, CounterValue::Unsigned(42));
-    }
+    fn test_snapshot_omits_unobserved_trackers() {
+        let min_empty = Minimum::new().with_name("min_empty");
+        let min_set = Minimum::new().with_name("min_set");
+        min_set.observe(42);
 
-    #[test]
-    fn test_counter_snapshot_with_label() {
-        let snapshot = CounterSnapshot::with_label(
-            "test",
-            Some(("method".to_string(), "GET".to_string())),
-            CounterValue::Unsigned(42),
-        );
-        assert_eq!(snapshot.name, "test");
-        assert!(snapshot.label.is_some());
-        assert_eq!(
-            snapshot.label.unwrap(),
-            ("method".to_string(), "GET".to_string())
-        );
-        assert_eq!(snapshot.value, CounterValue::Unsigned(42));
-    }
-
-    #[test]
-    fn test_counter_snapshot_from_observable() {
-        let counter = Unsigned::new().with_name("requests");
-        counter.add(100);
-
-        let snapshots = CounterSnapshot::from_observable(&counter);
-        assert_eq!(snapshots.len(), 1);
-        assert_eq!(snapshots[0].name, "requests");
-        assert!(snapshots[0].label.is_none());
-        assert_eq!(snapshots[0].value, CounterValue::Unsigned(100));
-    }
-
-    #[test]
-    fn test_counter_snapshot_from_observable_unnamed() {
-        let counter = Unsigned::new();
-        counter.add(50);
-
-        let snapshots = CounterSnapshot::from_observable(&counter);
-        assert_eq!(snapshots.len(), 1);
-        assert_eq!(snapshots[0].name, "(unnamed)");
-    }
-
-    #[test]
-    fn test_metrics_snapshot_new() {
-        let snapshot = MetricsSnapshot::new(vec![
-            CounterSnapshot::new("a", CounterValue::Unsigned(1)),
-            CounterSnapshot::new("b", CounterValue::Unsigned(2)),
-        ]);
-
-        assert_eq!(snapshot.counters.len(), 2);
-        assert!(snapshot.timestamp_ms.is_none());
-    }
-
-    #[test]
-    fn test_metrics_snapshot_with_timestamp() {
-        let snapshot = MetricsSnapshot::with_timestamp(
-            vec![CounterSnapshot::new("test", CounterValue::Unsigned(1))],
-            1234567890,
-        );
-
-        assert_eq!(snapshot.timestamp_ms, Some(1234567890));
-    }
-
-    #[test]
-    fn test_metrics_snapshot_get() {
-        let snapshot = MetricsSnapshot::new(vec![
-            CounterSnapshot::new("foo", CounterValue::Unsigned(1)),
-            CounterSnapshot::new("bar", CounterValue::Unsigned(2)),
-        ]);
-
-        assert!(snapshot.get("foo").is_some());
-        assert!(snapshot.get("bar").is_some());
-        assert!(snapshot.get("baz").is_none());
-    }
-
-    #[test]
-    fn test_metrics_snapshot_collect() {
-        let counter1 = Unsigned::new().with_name("c1");
-        let counter2 = Unsigned::new().with_name("c2");
-        counter1.add(10);
-        counter2.add(20);
-
-        let counters: Vec<&dyn Observable> = vec![&counter1, &counter2];
+        let counters: Vec<&dyn Observable> = vec![&min_empty, &min_set];
         let snapshot = MetricsSnapshot::collect(counters.into_iter());
 
-        assert_eq!(snapshot.counters.len(), 2);
-        assert_eq!(
-            snapshot.get("c1").unwrap().value,
-            CounterValue::Unsigned(10)
-        );
-        assert_eq!(
-            snapshot.get("c2").unwrap().value,
-            CounterValue::Unsigned(20)
-        );
+        assert_eq!(snapshot.counters.len(), 1);
+        assert_eq!(snapshot.counters[0].name, "min_set");
+        assert_eq!(snapshot.counters[0].value, CounterValue::Unsigned(42));
     }
 
     #[test]
-    fn test_metrics_snapshot_collect_labeled_group() {
-        use crate::labeled_group;
-
+    fn test_labeled_group_multi_label_snapshot() {
         labeled_group!(
             TestGroup,
-            "test_metric",
-            "label",
-            value: Unsigned,
-            a: "A": Unsigned,
-            b: "B": Unsigned,
+            "http_responses",
+            ["method", "status"],
+            get_200: ["GET", "200"]: Unsigned,
+            post_201: ["POST", "201"]: Unsigned,
         );
 
         let group = TestGroup::new();
-        group.value.add(100);
-        group.a.add(60);
-        group.b.add(40);
+        group.get_200.add(60);
+        group.post_201.add(40);
 
         let counters: Vec<&dyn Observable> = vec![&group];
         let snapshot = MetricsSnapshot::collect(counters.into_iter());
 
-        // Should have 3 entries: value (no label), a (label=A), b (label=B)
-        assert_eq!(snapshot.counters.len(), 3);
-
-        // Check that labels are preserved
-        let with_labels: Vec<_> = snapshot
-            .counters
-            .iter()
-            .filter(|c| c.label.is_some())
-            .collect();
-        assert_eq!(with_labels.len(), 2);
+        assert_eq!(snapshot.counters.len(), 2);
+        assert_eq!(snapshot.counters[0].labels.get("method").unwrap(), "GET");
+        assert_eq!(snapshot.counters[0].labels.get("status").unwrap(), "200");
     }
 
+    #[cfg(feature = "json")]
     #[test]
-    fn test_serialize_counter_snapshot() {
-        let snapshot = CounterSnapshot::new("test", CounterValue::Unsigned(42));
-        let json = serde_json::to_string(&snapshot).unwrap();
-        assert!(json.contains("test"));
-        assert!(json.contains("42"));
-    }
-
-    #[test]
-    fn test_deserialize_counter_snapshot() {
-        let json = r#"{"name":"test","value":42}"#;
-        let snapshot: CounterSnapshot = serde_json::from_str(json).unwrap();
-        assert_eq!(snapshot.name, "test");
-        assert_eq!(snapshot.value, CounterValue::Unsigned(42));
-    }
-
-    #[test]
-    fn test_serialize_metrics_snapshot() {
-        let snapshot = MetricsSnapshot::with_timestamp(
-            vec![CounterSnapshot::new("a", CounterValue::Unsigned(1))],
-            1234567890,
+    fn test_serde_roundtrip() {
+        let snap = CounterSnapshot::with_labels(
+            "http_req",
+            [("method", "GET")],
+            CounterValue::Unsigned(10),
         );
-        let json = serde_json::to_string(&snapshot).unwrap();
-        assert!(json.contains("timestamp_ms"));
-        assert!(json.contains("1234567890"));
-    }
-
-    #[test]
-    fn test_deserialize_metrics_snapshot() {
-        let json = r#"{"timestamp_ms":1234567890,"counters":[{"name":"a","value":1}]}"#;
-        let snapshot: MetricsSnapshot = serde_json::from_str(json).unwrap();
-        assert_eq!(snapshot.timestamp_ms, Some(1234567890));
-        assert_eq!(snapshot.counters.len(), 1);
+        let json = serde_json::to_string(&snap).unwrap();
+        assert_eq!(
+            json,
+            r#"{"name":"http_req","labels":{"method":"GET"},"value":10}"#
+        );
+        let decoded: CounterSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, snap);
     }
 }

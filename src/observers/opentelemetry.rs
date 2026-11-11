@@ -1,93 +1,25 @@
-//! OpenTelemetry observer for exporting counters via OTLP.
+//! OpenTelemetry observer for exporting counters via observable callbacks.
 //!
-//! This module provides [`OtelObserver`], which registers contatori counters
-//! with OpenTelemetry's MeterProvider using observable instruments (callbacks).
-//!
-//! # Feature Flag
-//!
-//! This module requires the `opentelemetry` feature:
-//!
-//! ```toml
-//! [dependencies]
-//! contatori = { version = "0.7", features = ["opentelemetry"] }
-//! ```
-//!
-//! # How It Works
-//!
-//! Unlike push-based approaches, this observer uses OpenTelemetry's observable
-//! instruments which are read via callbacks during metric collection. This
-//! integrates naturally with any OpenTelemetry exporter (OTLP, Prometheus, etc.)
-//!
-//! # Example
-//!
-//! ```rust,ignore
-//! use contatori::counters::unsigned::Unsigned;
-//! use contatori::counters::Observable;
-//! use contatori::observers::opentelemetry::OtelObserver;
-//!
-//! static REQUESTS: Unsigned = Unsigned::new().with_name("http_requests_total");
-//! static ERRORS: Unsigned = Unsigned::new().with_name("http_errors_total");
-//!
-//! fn main() -> contatori::observers::Result<()> {
-//!     // Setup OpenTelemetry MeterProvider first (see examples)
-//!     
-//!     let observer = OtelObserver::new("myapp");
-//!     observer.register(&[&REQUESTS, &ERRORS])?;
-//!
-//!     // Counters are now automatically exported by the MeterProvider
-//!     REQUESTS.add(1);
-//!     
-//!     Ok(())
-//! }
-//! ```
+//! Requires the `opentelemetry` feature.
 
 use crate::counters::{MetricKind, Observable, ObservableEntry};
-use opentelemetry::{global, metrics::Meter, KeyValue};
+use opentelemetry::{KeyValue, global, metrics::Meter};
 
 use super::{OtelError, Result};
 
-/// Observer that exports counters to OpenTelemetry using observable instruments.
+/// Observer that registers `contatori` counters as OpenTelemetry observable instruments.
 ///
-/// This observer registers contatori counters with OpenTelemetry's MeterProvider,
-/// using callbacks that read counter values during metric collection.
-///
-/// # Static Counters
-///
-/// Counters must be `'static` (typically declared as `static` globals) because
-/// OpenTelemetry callbacks need to hold references for the lifetime of the program.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use contatori::counters::unsigned::Unsigned;
-/// use contatori::counters::monotone::Monotone;
-/// use contatori::counters::Observable;
-/// use contatori::observers::opentelemetry::OtelObserver;
-///
-/// static REQUESTS: Monotone = Monotone::new().with_name("http_requests_total");
-/// static CONNECTIONS: Unsigned = Unsigned::new().with_name("active_connections");
-///
-/// let observer = OtelObserver::new("myapp")
-///     .with_description_prefix("My Application");
-///
-/// observer.register(&[&REQUESTS, &CONNECTIONS])?;
-/// ```
+/// Supports single counters as well as single-label and multi-label
+/// [`labeled_group!`](crate::labeled_group) structs, automatically skipping
+/// uninitialized statistical trackers (`try_value() == None`).
 pub struct OtelObserver {
     meter: Meter,
     description_prefix: Option<String>,
 }
 
 impl OtelObserver {
-    /// Creates a new OpenTelemetry observer with the given meter name.
-    ///
-    /// The meter name is typically the application or library name.
-    /// It will be used to create a meter from the global MeterProvider.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let observer = OtelObserver::new("myapp");
-    /// ```
+    /// Creates a new OpenTelemetry observer obtaining a `Meter` from the global `MeterProvider`.
+    #[must_use]
     pub fn new(meter_name: &'static str) -> Self {
         Self {
             meter: global::meter(meter_name),
@@ -95,17 +27,8 @@ impl OtelObserver {
         }
     }
 
-    /// Creates an observer with a specific meter instance.
-    ///
-    /// Use this when you need more control over the meter configuration,
-    /// or when you want to use a meter from a specific MeterProvider.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let meter = my_meter_provider.meter("myapp");
-    /// let observer = OtelObserver::with_meter(meter);
-    /// ```
+    /// Creates an OpenTelemetry observer using an explicit [`Meter`].
+    #[must_use]
     pub fn with_meter(meter: Meter) -> Self {
         Self {
             meter,
@@ -113,75 +36,39 @@ impl OtelObserver {
         }
     }
 
-    /// Sets a description prefix for all registered metrics.
-    ///
-    /// The prefix will be prepended to each metric's description.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let observer = OtelObserver::new("myapp")
-    ///     .with_description_prefix("My Application");
-    /// // Metric "requests" will have description "My Application: requests"
-    /// ```
+    /// Prepends `prefix` to all generated metric descriptions.
+    #[must_use]
     pub fn with_description_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.description_prefix = Some(prefix.into());
         self
     }
 
-    /// Builds the description string for a metric.
     fn build_description(&self, name: &str) -> String {
         match &self.description_prefix {
-            Some(prefix) => format!("{}: {}", prefix, name),
-            None => format!("{} metric", name),
+            Some(prefix) => format!("{prefix}: {name}"),
+            None => format!("{name} metric"),
         }
     }
 
-    /// Registers all counters with OpenTelemetry.
+    /// Registers a slice of `'static` observables with OpenTelemetry.
     ///
-    /// Each counter is registered as an observable instrument based on its
-    /// [`metric_kind()`](Observable::metric_kind):
-    ///
-    /// - [`MetricKind::Counter`] → `ObservableCounter` (monotonically increasing)
-    /// - [`MetricKind::Gauge`] → `ObservableGauge` (can go up or down)
-    /// - [`MetricKind::Histogram`] → `ObservableGauge` (treated as gauge)
-    ///
-    /// For labeled groups, the labels from [`expand()`](Observable::expand)
-    /// are automatically converted to OpenTelemetry attributes.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use contatori::counters::unsigned::Unsigned;
-    /// use contatori::counters::monotone::Monotone;
-    /// use contatori::counters::average::Average;
-    /// use contatori::counters::Observable;
-    /// use contatori::observers::opentelemetry::OtelObserver;
-    ///
-    /// static REQUESTS: Monotone = Monotone::new().with_name("requests_total");
-    /// static ERRORS: Monotone = Monotone::new().with_name("errors_total");
-    /// static LATENCY: Average = Average::new().with_name("latency_ms");
-    ///
-    /// let observer = OtelObserver::new("myapp");
-    /// observer.register(&[&REQUESTS, &ERRORS, &LATENCY])?;
-    /// ```
-    pub fn register(&self, counters: &[&'static (dyn Observable + Send + Sync)]) -> Result<()> {
+    /// - [`MetricKind::Counter`] → `u64_observable_counter`
+    /// - [`MetricKind::Gauge`] / [`MetricKind::Histogram`] → `f64_observable_gauge`
+    pub fn register(&self, counters: &[&'static dyn Observable]) -> Result<()> {
         for &counter in counters {
             self.register_one(counter)?;
         }
         Ok(())
     }
 
-    /// Registers a single counter based on its metric kind.
-    fn register_one(&self, counter: &'static (dyn Observable + Send + Sync)) -> Result<()> {
+    fn register_one(&self, counter: &'static dyn Observable) -> Result<()> {
         match counter.metric_kind() {
             MetricKind::Counter => self.register_counter(counter),
             MetricKind::Gauge | MetricKind::Histogram => self.register_gauge(counter),
         }
     }
 
-    /// Registers an observable counter (monotonically increasing).
-    fn register_counter(&self, counter: &'static (dyn Observable + Send + Sync)) -> Result<()> {
+    fn register_counter(&self, counter: &'static dyn Observable) -> Result<()> {
         let name = counter.name();
         if name.is_empty() {
             return Err(OtelError::MetricError("counter must have a name".into()).into());
@@ -194,9 +81,13 @@ impl OtelObserver {
             .u64_observable_counter(name)
             .with_description(description)
             .with_callback(move |observer| {
-                for entry in counter.expand() {
-                    let attributes = entry_to_attributes(&entry);
-                    observer.observe(entry.value.as_u64(), &attributes);
+                let mut entries = Vec::new();
+                counter.expand_into(&mut entries);
+                for entry in entries {
+                    if let Some(val) = entry.value {
+                        let attributes = entry_to_attributes(&entry);
+                        observer.observe(val.as_u64(), &attributes);
+                    }
                 }
             })
             .build();
@@ -204,8 +95,7 @@ impl OtelObserver {
         Ok(())
     }
 
-    /// Registers an observable gauge (can go up or down).
-    fn register_gauge(&self, counter: &'static (dyn Observable + Send + Sync)) -> Result<()> {
+    fn register_gauge(&self, counter: &'static dyn Observable) -> Result<()> {
         let name = counter.name();
         if name.is_empty() {
             return Err(OtelError::MetricError("counter must have a name".into()).into());
@@ -213,15 +103,18 @@ impl OtelObserver {
 
         let description = self.build_description(name);
 
-        // Use f64 gauge to support all value types (unsigned, signed, float)
         let _ = self
             .meter
             .f64_observable_gauge(name)
             .with_description(description)
             .with_callback(move |observer| {
-                for entry in counter.expand() {
-                    let attributes = entry_to_attributes(&entry);
-                    observer.observe(entry.value.as_f64(), &attributes);
+                let mut entries = Vec::new();
+                counter.expand_into(&mut entries);
+                for entry in entries {
+                    if let Some(val) = entry.value {
+                        let attributes = entry_to_attributes(&entry);
+                        observer.observe(val.as_f64(), &attributes);
+                    }
                 }
             })
             .build();
@@ -230,74 +123,56 @@ impl OtelObserver {
     }
 }
 
-/// Converts an [`ObservableEntry`]'s label to OpenTelemetry [`KeyValue`] attributes.
 fn entry_to_attributes(entry: &ObservableEntry) -> Vec<KeyValue> {
-    match &entry.label {
-        Some((key, value)) => vec![KeyValue::new(*key, *value)],
-        None => vec![],
-    }
+    entry
+        .labels
+        .iter()
+        .map(|&(key, value)| KeyValue::new(key, value))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::counters::CounterValue;
+    use crate::counters::monotone::Monotone;
     use crate::counters::unsigned::Unsigned;
+    use crate::labeled_group;
 
     #[test]
-    fn test_otel_observer_new() {
-        let observer = OtelObserver::new("test");
-        assert!(observer.description_prefix.is_none());
-    }
-
-    #[test]
-    fn test_otel_observer_with_description_prefix() {
-        let observer = OtelObserver::new("test").with_description_prefix("My App");
-        assert_eq!(observer.description_prefix, Some("My App".to_string()));
-    }
-
-    #[test]
-    fn test_build_description_with_prefix() {
-        let observer = OtelObserver::new("test").with_description_prefix("My App");
-        assert_eq!(observer.build_description("requests"), "My App: requests");
-    }
-
-    #[test]
-    fn test_build_description_without_prefix() {
-        let observer = OtelObserver::new("test");
-        assert_eq!(observer.build_description("requests"), "requests metric");
-    }
-
-    #[test]
-    fn test_entry_to_attributes_with_label() {
+    fn test_entry_to_attributes_multi_label() {
+        static LABELS: [(&str, &str); 2] = [("method", "GET"), ("status", "200")];
         let entry = ObservableEntry {
-            name: "test",
-            label: Some(("method", "GET")),
-            value: crate::counters::CounterValue::Unsigned(1),
+            name: "http_responses_total",
+            labels: &LABELS,
+            value: Some(CounterValue::Unsigned(1)),
             metric_kind: MetricKind::Counter,
         };
         let attrs = entry_to_attributes(&entry);
-        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs.len(), 2);
         assert_eq!(attrs[0].key.as_str(), "method");
-    }
-
-    #[test]
-    fn test_entry_to_attributes_without_label() {
-        let entry = ObservableEntry {
-            name: "test",
-            label: None,
-            value: crate::counters::CounterValue::Unsigned(1),
-            metric_kind: MetricKind::Counter,
-        };
-        let attrs = entry_to_attributes(&entry);
-        assert!(attrs.is_empty());
+        assert_eq!(attrs[1].key.as_str(), "status");
     }
 
     #[test]
     fn test_register_unnamed_counter_fails() {
         let observer = OtelObserver::new("test");
         static UNNAMED: Unsigned = Unsigned::new();
-        let counters: &[&'static (dyn Observable + Send + Sync)] = &[&UNNAMED];
-        let result = observer.register(counters);
-        assert!(result.is_err());
+        assert!(observer.register(&[&UNNAMED]).is_err());
+    }
+
+    #[test]
+    fn test_labeled_group_monotone_registers_as_counter() {
+        labeled_group!(
+            MonotoneGroup,
+            "monotone_group_total",
+            "method",
+            get: "GET": Monotone,
+        );
+        static GROUP: MonotoneGroup = MonotoneGroup::new();
+        assert_eq!(GROUP.metric_kind(), MetricKind::Counter);
+
+        let observer = OtelObserver::new("test").with_description_prefix("Svc");
+        assert!(observer.register(&[&GROUP]).is_ok());
     }
 }

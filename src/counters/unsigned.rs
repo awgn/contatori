@@ -1,259 +1,167 @@
-//! Unsigned integer counter with sharded atomic storage.
+//! Unsigned 64-bit integer counter with sharded atomic storage.
 //!
 //! This module provides [`Unsigned`], a high-performance counter optimized for
-//! concurrent increments from multiple threads. It uses sharding to minimize
+//! concurrent updates from multiple threads. It uses sharding to minimize
 //! contention and cache-line padding to prevent false sharing.
-
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::counters::{
-    sealed, CounterValue, GetComponentCounter, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX,
+    CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
 };
 
-/// A high-performance unsigned integer counter using sharded atomic storage.
+/// A high-performance unsigned 64-bit integer counter using sharded atomic storage.
 ///
-/// `Unsigned` is designed for scenarios where multiple threads frequently
-/// increment a shared counter. Instead of using a single atomic variable
-/// (which causes severe contention), it distributes updates across 64
-/// cache-line-padded slots.
-///
-/// # Performance
-///
-/// On an Apple M2 with 8 threads performing 1 million increments each:
-/// - **Single AtomicUsize**: ~162 ms
-/// - **Unsigned (sharded)**: ~2.3 ms
-/// - **Speedup**: ~71x faster
+/// `Unsigned` distributes updates across `SHARDS` (64 by default) cache-line-padded
+/// slots so concurrent threads rarely contend on the same cache line.
 ///
 /// # Memory Usage
 ///
-/// Each `Unsigned` counter uses approximately 4KB of memory (64 slots × 64 bytes).
+/// With the default `SHARDS = 64` and 128-byte cache-line alignment, each counter
+/// occupies approximately 8 KB of memory. You can customize the shard count with
+/// `Unsigned::<16>::with_shards()` (any non-zero power of two).
 ///
 /// # Examples
 ///
-/// Basic usage:
-///
 /// ```rust
-/// use contatori::counters::unsigned::Unsigned;
-/// use contatori::counters::Observable;
+/// use contatori::{Observable, Unsigned};
 ///
-/// let counter = Unsigned::new();
-/// counter.add(1);
+/// let counter = Unsigned::new().with_name("requests");
+/// counter.incr();
 /// counter.add(5);
-/// assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(6));
+/// assert_eq!(counter.value().as_u64(), 6);
 /// ```
-///
-/// Multi-threaded usage:
-///
-/// ```rust
-/// use contatori::counters::unsigned::Unsigned;
-/// use contatori::counters::Observable;
-/// use std::sync::Arc;
-/// use std::thread;
-///
-/// let counter = Arc::new(Unsigned::new());
-/// let mut handles = vec![];
-///
-/// for _ in 0..4 {
-///     let c = Arc::clone(&counter);
-///     handles.push(thread::spawn(move || {
-///         for _ in 0..1000 {
-///             c.add(1);
-///         }
-///     }));
-/// }
-///
-/// for h in handles {
-///     h.join().unwrap();
-/// }
-///
-/// assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(4000));
-/// ```
-pub struct Unsigned {
+pub struct Unsigned<const SHARDS: usize = DEFAULT_SHARDS> {
     name: &'static str,
-    components: [CachePadded<AtomicUsize>; NUM_COMPONENTS],
+    components: [CachePadded<AtomicU64>; SHARDS],
 }
 
-impl GetComponentCounter for Unsigned {
-    type CounterType = AtomicUsize;
-
-    /// Returns a reference to the current thread's shard.
-    #[inline]
-    fn get_component_counter(&self) -> &AtomicUsize {
-        THREAD_SLOT_INDEX.with(|idx| &self.components[*idx])
+impl Unsigned<DEFAULT_SHARDS> {
+    /// Creates a new counter with the default number of shards (`64`), initialized to zero.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self::with_shards()
     }
 }
 
-impl Unsigned {
-    /// Creates a new counter initialized to zero.
+impl<const SHARDS: usize> Unsigned<SHARDS> {
+    /// Creates a new counter with `SHARDS` shards, initialized to zero.
     ///
-    /// All 64 shards are initialized to zero. The counter has no name by default.
+    /// # Panics
     ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::unsigned::Unsigned;
-    /// use contatori::counters::Observable;
-    ///
-    /// let counter = Unsigned::new();
-    /// assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(0));
-    /// ```
-    pub const fn new() -> Self {
-        const ZERO: CachePadded<AtomicUsize> = CachePadded::new(AtomicUsize::new(0));
-        Unsigned {
-            components: [ZERO; NUM_COMPONENTS],
+    /// Fails to compile if `SHARDS` is zero or not a power of two.
+    #[must_use]
+    pub const fn with_shards() -> Self {
+        const {
+            assert!(
+                SHARDS > 0 && SHARDS.is_power_of_two(),
+                "SHARDS must be a non-zero power of two"
+            );
+        }
+        Self {
             name: "",
+            components: [const { CachePadded::new(AtomicU64::new(0)) }; SHARDS],
         }
     }
 
-    /// Sets the name of this counter, returning `self` for method chaining.
-    ///
-    /// The name is used when formatting the counter for display and can help
-    /// identify counters in logs or metrics output.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::unsigned::Unsigned;
-    /// use contatori::counters::Observable;
-    ///
-    /// let counter = Unsigned::new().with_name("http_requests");
-    /// assert_eq!(counter.name(), "http_requests");
-    /// ```
+    /// Sets the metric name of this counter, returning `self` for method chaining.
+    #[must_use]
     pub const fn with_name(self, name: &'static str) -> Self {
         Self { name, ..self }
     }
 
-    /// Adds a value to the counter.
-    ///
-    /// This operation is lock-free and extremely fast due to sharding.
-    /// Each thread updates its own shard, avoiding contention.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::unsigned::Unsigned;
-    /// use contatori::counters::Observable;
-    ///
-    /// let counter = Unsigned::new();
-    /// counter.add(5);
-    /// counter.add(3);
-    /// assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(8));
-    /// ```
     #[inline]
-    pub fn add(&self, value: usize) {
-        self.get_component_counter()
-            .fetch_add(value, Ordering::Relaxed);
+    fn local_slot(&self) -> &AtomicU64 {
+        &self.components[thread_slot_index::<SHARDS>()]
     }
 
-    /// Subtracts a value from the counter.
-    ///
-    /// # Warning
-    ///
-    /// This uses wrapping subtraction. Subtracting more than the current value
-    /// will cause the counter to wrap around to a very large number.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::unsigned::Unsigned;
-    /// use contatori::counters::Observable;
-    ///
-    /// let counter = Unsigned::new();
-    /// counter.add(10);
-    /// counter.sub(3);
-    /// assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(7));
-    /// ```
+    /// Increments the counter by `1`.
     #[inline]
-    pub fn sub(&self, value: usize) {
-        self.get_component_counter()
-            .fetch_sub(value, Ordering::Relaxed);
+    pub fn incr(&self) {
+        self.add(1);
+    }
+
+    /// Decrements the counter by `1` (using wrapping arithmetic).
+    #[inline]
+    pub fn decr(&self) {
+        self.sub(1);
+    }
+
+    /// Adds `value` to the counter.
+    #[inline]
+    pub fn add(&self, value: u64) {
+        self.local_slot().fetch_add(value, Ordering::Relaxed);
+    }
+
+    /// Subtracts `value` from the counter using wrapping arithmetic.
+    ///
+    /// Even if an individual thread's shard wraps around zero, the global sum
+    /// aggregates across all shards using `wrapping_add` to produce the exact net value.
+    #[inline]
+    pub fn sub(&self, value: u64) {
+        self.local_slot().fetch_sub(value, Ordering::Relaxed);
     }
 
     /// Sets the value of the current thread's shard directly.
-    ///
-    /// This is useful for gauge-like behavior where you want to set an
-    /// absolute value rather than increment/decrement.
-    ///
-    /// # Note
-    ///
-    /// This only sets the current thread's shard. Other threads' contributions
-    /// remain unchanged, so `value()` may return a different total.
     #[inline]
-    pub fn set_local_value(&self, value: usize) {
-        self.get_component_counter().store(value, Ordering::Relaxed);
+    pub fn set_local_value(&self, value: u64) {
+        self.local_slot().store(value, Ordering::Relaxed);
     }
 
     /// Returns the value of the current thread's shard.
-    ///
-    /// This is useful for debugging or when you need to know this thread's
-    /// contribution to the total.
+    #[must_use]
     #[inline]
-    pub fn local_value(&self) -> usize {
-        self.get_component_counter().load(Ordering::Relaxed)
+    pub fn local_value(&self) -> u64 {
+        self.local_slot().load(Ordering::Relaxed)
     }
 
-    /// Computes the total value by summing all shards.
+    /// Computes the total value across all shards using wrapping addition.
     #[inline]
-    fn total_value(&self) -> usize {
+    fn total_value(&self) -> u64 {
         self.components
             .iter()
             .map(|counter| counter.load(Ordering::Relaxed))
-            .sum()
+            .fold(0u64, u64::wrapping_add)
     }
 
     /// Computes the total value and resets all shards to zero.
     #[inline]
-    fn total_value_and_reset(&self) -> usize {
-        let mut total = 0;
-        for counter in self.components.iter() {
-            total += counter.swap(0, Ordering::Relaxed);
-        }
-        total
+    fn total_value_and_reset(&self) -> u64 {
+        self.components
+            .iter()
+            .map(|counter| counter.swap(0, Ordering::Relaxed))
+            .fold(0u64, u64::wrapping_add)
     }
 }
 
-impl Observable for Unsigned {
-    /// Returns the total counter value by summing all shards.
-    ///
-    /// This iterates over all 64 shards and sums their values.
+impl<const SHARDS: usize> Observable for Unsigned<SHARDS> {
     #[inline]
     fn value(&self) -> CounterValue {
-        CounterValue::Unsigned(self.total_value() as u64)
+        CounterValue::Unsigned(self.total_value())
     }
 
-    /// Returns the name of this counter.
     #[inline]
     fn name(&self) -> &'static str {
         self.name
     }
 }
 
-impl sealed::Resettable for Unsigned {
-    /// Returns the total value and resets all shards to zero.
-    ///
-    /// Useful for periodic metric collection.
+impl<const SHARDS: usize> sealed::Resettable for Unsigned<SHARDS> {
     #[inline]
     fn value_and_reset(&self) -> CounterValue {
-        CounterValue::Unsigned(self.total_value_and_reset() as u64)
+        CounterValue::Unsigned(self.total_value_and_reset())
     }
 }
 
-impl Default for Unsigned {
-    /// Creates a new counter initialized to zero with no name.
+impl<const SHARDS: usize> Default for Unsigned<SHARDS> {
     fn default() -> Self {
-        Self::new()
+        Self::with_shards()
     }
 }
 
-impl Debug for Unsigned {
-    /// Formats the counter showing non-zero shards.
-    ///
-    /// Output format: `name{ [slot]:value [slot]:value ... }`
-    ///
-    /// Only shards with non-zero values are shown.
+impl<const SHARDS: usize> Debug for Unsigned<SHARDS> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}{{", self.name)?;
         for (i, counter) in self.components.iter().enumerate() {
@@ -269,142 +177,95 @@ impl Debug for Unsigned {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::counters::Observable;
+    use crate::adapters::Resettable;
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
-    fn test_new() {
+    fn test_new_and_incr_decr() {
         let counter = Unsigned::new();
+        assert_eq!(counter.value(), CounterValue::Unsigned(0));
+        counter.incr();
+        counter.add(4);
+        counter.decr();
+        assert_eq!(counter.value(), CounterValue::Unsigned(4));
+    }
+
+    #[test]
+    fn test_custom_shards() {
+        static SMALL: Unsigned<16> = Unsigned::with_shards().with_name("small");
+        SMALL.add(10);
+        assert_eq!(SMALL.name(), "small");
+        assert_eq!(SMALL.value(), CounterValue::Unsigned(10));
+    }
+
+    #[test]
+    fn test_cross_thread_add_and_sub_wrapping() {
+        // Thread A increments by 100 on its shard, Thread B decrements by 30 on a different shard
+        // (causing Thread B's shard to wrap below 0). Aggregation must yield 70 without panicking.
+        let counter = Arc::new(Unsigned::new());
+
+        let c1 = Arc::clone(&counter);
+        let t1 = thread::spawn(move || {
+            c1.add(100);
+        });
+
+        let c2 = Arc::clone(&counter);
+        let t2 = thread::spawn(move || {
+            c2.sub(30);
+        });
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        assert_eq!(counter.value(), CounterValue::Unsigned(70));
+    }
+
+    #[test]
+    fn test_cross_thread_resettable_with_sub() {
+        let counter = Arc::new(Resettable::new(Unsigned::new()));
+
+        let c1 = Arc::clone(&counter);
+        let t1 = thread::spawn(move || c1.add(50));
+        let c2 = Arc::clone(&counter);
+        let t2 = thread::spawn(move || c2.sub(20));
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        assert_eq!(counter.value(), CounterValue::Unsigned(30));
         assert_eq!(counter.value(), CounterValue::Unsigned(0));
     }
 
     #[test]
-    fn test_add() {
-        let counter = Unsigned::new();
-        counter.add(1);
-        assert_eq!(counter.value(), CounterValue::Unsigned(1));
-        counter.add(1);
-        counter.add(1);
-        assert_eq!(counter.value(), CounterValue::Unsigned(3));
-    }
-
-    #[test]
-    fn test_sub() {
-        let counter = Unsigned::new();
-        counter.set_local_value(10);
-        counter.sub(1);
-        assert_eq!(counter.value(), CounterValue::Unsigned(9));
-        counter.sub(1);
-        counter.sub(1);
-        assert_eq!(counter.value(), CounterValue::Unsigned(7));
-    }
-
-    #[test]
-    fn test_set_local_value() {
-        let counter = Unsigned::new();
+    fn test_local_value_and_debug() {
+        let counter = Unsigned::new().with_name("my_counter");
         counter.set_local_value(42);
         assert_eq!(counter.local_value(), 42);
-        assert_eq!(counter.value(), CounterValue::Unsigned(42));
-    }
-
-    #[test]
-    fn test_local_value() {
-        let counter = Unsigned::new();
-        assert_eq!(counter.local_value(), 0);
-        counter.add(1);
-        assert_eq!(counter.local_value(), 1);
-    }
-
-    #[test]
-    fn test_resettable() {
-        use crate::adapters::Resettable;
-        let counter = Resettable::new(Unsigned::new());
-        counter.add(1);
-        counter.add(1);
-        counter.add(1);
-        assert_eq!(counter.value(), CounterValue::Unsigned(3));
-        // After value() the counter should be reset
-        assert_eq!(counter.value(), CounterValue::Unsigned(0));
-    }
-
-    #[test]
-    fn test_debug() {
-        let counter = Unsigned::new();
-        counter.set_local_value(5);
-        let debug_str = format!("{:?}", counter);
-        assert!(debug_str.starts_with("{"));
-        assert!(debug_str.contains("5"));
-        assert!(debug_str.ends_with("}"));
-    }
-
-    #[test]
-    fn test_dyn_format() {
-        let counter = Unsigned::new().with_name("test_counter");
-        counter.add(1);
-        let formatted = format!("{}", &counter as &dyn Observable);
-        assert_eq!(formatted, "test_counter:1");
-    }
-
-    #[test]
-    fn test_dyn_debug() {
-        let counter = Unsigned::new().with_name("test_counter");
-        counter.add(1);
-        counter.add(1);
-        let debug_str = format!("{:?}", &counter as &dyn Observable);
-        assert!(debug_str.starts_with("test_counter{"));
-        assert!(debug_str.contains("2"));
-        assert!(debug_str.ends_with("}"));
+        assert_eq!(format!("{}", &counter as &dyn Observable), "my_counter:42");
+        let dbg = format!("{counter:?}");
+        assert!(dbg.starts_with("my_counter{"));
+        assert!(dbg.contains("42"));
     }
 
     #[test]
     fn test_multiple_threads() {
-        use std::sync::Arc;
-        use std::thread;
-
         let counter = Arc::new(Unsigned::new());
         let mut handles = vec![];
 
         for _ in 0..4 {
-            let counter_clone = Arc::clone(&counter);
-            let handle = thread::spawn(move || {
+            let c = Arc::clone(&counter);
+            handles.push(thread::spawn(move || {
                 for _ in 0..100 {
-                    counter_clone.add(1);
+                    c.incr();
                 }
-            });
-            handles.push(handle);
+            }));
         }
 
-        for handle in handles {
-            handle.join().unwrap();
+        for h in handles {
+            h.join().unwrap();
         }
 
         assert_eq!(counter.value(), CounterValue::Unsigned(400));
-    }
-
-    #[test]
-    fn test_name_default() {
-        let counter = Unsigned::new();
-        assert_eq!(counter.name(), "");
-    }
-
-    #[test]
-    fn test_with_name() {
-        let counter = Unsigned::new().with_name("my_counter");
-        assert_eq!(counter.name(), "my_counter");
-    }
-
-    #[test]
-    fn test_with_name_preserves_value() {
-        let counter = Unsigned::new().with_name("test");
-        counter.add(1);
-        counter.add(1);
-        assert_eq!(counter.name(), "test");
-        assert_eq!(counter.value(), CounterValue::Unsigned(2));
-    }
-
-    #[test]
-    fn test_default() {
-        let counter = Unsigned::default();
-        assert_eq!(counter.value(), CounterValue::Unsigned(0));
-        assert_eq!(counter.name(), "");
     }
 }

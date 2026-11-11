@@ -6,15 +6,10 @@
 //! ```
 
 use clap::{Parser, ValueEnum};
-use contatori::counters::average::Average;
-use contatori::counters::maximum::Maximum;
-use contatori::counters::minimum::Minimum;
-use contatori::counters::signed::Signed;
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
 use contatori::observers::json::JsonObserver;
-use contatori::observers::prometheus::{MetricType, PrometheusObserver};
+use contatori::observers::prometheus::PrometheusObserver;
 use contatori::observers::table::{CompactSeparator, TableObserver, TableStyle};
+use contatori::prelude::*;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -39,6 +34,7 @@ enum StyleChoice {
     #[default]
     Rounded,
     Sharp,
+    Double,
     Modern,
     Markdown,
     Dots,
@@ -51,6 +47,7 @@ impl From<StyleChoice> for TableStyle {
             StyleChoice::Ascii => TableStyle::Ascii,
             StyleChoice::Rounded => TableStyle::Rounded,
             StyleChoice::Sharp => TableStyle::Sharp,
+            StyleChoice::Double => TableStyle::Double,
             StyleChoice::Modern => TableStyle::Modern,
             StyleChoice::Markdown => TableStyle::Markdown,
             StyleChoice::Dots => TableStyle::Dots,
@@ -127,7 +124,7 @@ struct Args {
 
     /// Number of iterations per thread in simulation
     #[arg(long, default_value = "10000")]
-    iterations: usize,
+    iterations: u64,
 
     /// Add a title to the output (table formats)
     #[arg(long)]
@@ -143,9 +140,9 @@ struct Args {
 }
 
 /// Creates sample counters with initial values.
-fn create_counters() -> (Unsigned, Unsigned, Signed, Minimum, Maximum, Average) {
-    let requests = Unsigned::new().with_name("http_requests_total");
-    let errors = Unsigned::new().with_name("http_errors_total");
+fn create_counters() -> (Monotone, Monotone, Signed, Minimum, Maximum, Average) {
+    let requests = Monotone::new().with_name("http_requests_total");
+    let errors = Monotone::new().with_name("http_errors_total");
     let connections = Signed::new().with_name("active_connections");
     let min_latency = Minimum::new().with_name("request_latency_min_ms");
     let max_latency = Maximum::new().with_name("request_latency_max_ms");
@@ -172,19 +169,20 @@ fn create_counters() -> (Unsigned, Unsigned, Signed, Minimum, Maximum, Average) 
 }
 
 /// Simulates concurrent counter updates.
+#[allow(clippy::too_many_arguments)]
 fn simulate_traffic(
-    requests: &Arc<Unsigned>,
-    errors: &Arc<Unsigned>,
+    requests: &Arc<Monotone>,
+    errors: &Arc<Monotone>,
     connections: &Arc<Signed>,
     min_latency: &Arc<Minimum>,
     max_latency: &Arc<Maximum>,
     avg_latency: &Arc<Average>,
     num_threads: usize,
-    iterations: usize,
+    iterations: u64,
 ) {
     let mut handles = vec![];
 
-    for i in 0..num_threads {
+    for i in 0..num_threads as u64 {
         let req = Arc::clone(requests);
         let err = Arc::clone(errors);
         let conn = Arc::clone(connections);
@@ -194,19 +192,19 @@ fn simulate_traffic(
 
         let handle = thread::spawn(move || {
             for j in 0..iterations {
-                req.add(1);
+                req.incr();
 
                 // Simulate ~5% error rate
                 if (i * iterations + j) % 20 == 0 {
-                    err.add(1);
+                    err.incr();
                 }
 
                 // Simulate connection churn
                 if j % 10 == 0 {
-                    conn.add(1);
+                    conn.incr();
                 }
                 if j % 15 == 0 {
-                    conn.sub(1);
+                    conn.decr();
                 }
 
                 // Simulate latency observations
@@ -260,19 +258,14 @@ fn render_output(args: &Args, counters: Vec<&dyn Observable>) -> String {
                 .include_timestamp(args.timestamp);
 
             observer
-                .to_json(counters.into_iter())
-                .unwrap_or_else(|e| format!("Error: {}", e))
+                .render(counters.into_iter())
+                .unwrap_or_else(|e| format!("Error: {e}"))
         }
 
         OutputFormat::Prometheus => {
+            // Metric types (Counter vs Gauge) are inferred automatically from MetricKind!
             let mut observer = PrometheusObserver::new()
                 .with_namespace(&args.namespace)
-                .with_type("http_requests_total", MetricType::Counter)
-                .with_type("http_errors_total", MetricType::Counter)
-                .with_type("active_connections", MetricType::Gauge)
-                .with_type("request_latency_min_ms", MetricType::Gauge)
-                .with_type("request_latency_max_ms", MetricType::Gauge)
-                .with_type("request_latency_avg_ms", MetricType::Gauge)
                 .with_help("http_requests_total", "Total number of HTTP requests")
                 .with_help("http_errors_total", "Total number of HTTP errors")
                 .with_help("active_connections", "Number of active connections")
@@ -295,7 +288,7 @@ fn render_output(args: &Args, counters: Vec<&dyn Observable>) -> String {
 
             observer
                 .render(counters.into_iter())
-                .unwrap_or_else(|e| format!("Error: {}", e))
+                .unwrap_or_else(|e| format!("Error: {e}"))
         }
     }
 }

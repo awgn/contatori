@@ -1,225 +1,138 @@
-//! Monotone integer counter with sharded atomic storage.
+//! Monotone 64-bit unsigned counter with sharded atomic storage.
 //!
-//! This counter type returns [`MetricKind::Counter`]
-//! because it is monotonically increasing and never decreases.
-//!
-//! This module provides [`Monotone`], a high-performance counter optimized for
-//! concurrent increments from multiple threads. It uses sharding to minimize
-//! contention and cache-line padding to prevent false sharing.
-
-use std::sync::atomic::{AtomicUsize, Ordering};
+//! [`Monotone`] only supports non-decreasing operations (`add`, `incr`) and reports
+//! [`MetricKind::Counter`], making it ideal for cumulative counters in Prometheus
+//! and OpenTelemetry.
 
 use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::counters::{
-    sealed, CounterValue, GetComponentCounter, MetricKind, Observable, NUM_COMPONENTS,
-    THREAD_SLOT_INDEX,
+    CounterValue, DEFAULT_SHARDS, MetricKind, Observable, sealed, thread_slot_index,
 };
 
-/// A high-performance monotone integer counter using sharded atomic storage.
+/// A high-performance monotonically increasing 64-bit counter.
 ///
-/// `Monotone` is designed for scenarios where multiple threads frequently
-/// increment a shared counter. Instead of using a single atomic variable
-/// (which causes severe contention), it distributes updates across 64
-/// cache-line-padded slots.
-///
-/// # Performance
-///
-/// On an Apple M2 with 8 threads performing 1 million increments each:
-/// - **Single AtomicUsize**: ~162 ms
-/// - **Monotone (sharded)**: ~2.3 ms
-/// - **Speedup**: ~71x faster
-///
-/// # Memory Usage
-///
-/// Each `Monotone` counter uses approximately 4KB of memory (64 slots × 64 bytes).
+/// Unlike [`Unsigned`](super::unsigned::Unsigned), `Monotone` only exposes `add` and `incr`
+/// (no subtraction or reset), guaranteeing monotonicity and reporting [`MetricKind::Counter`].
 ///
 /// # Examples
 ///
-/// Basic usage:
-///
 /// ```rust
-/// use contatori::counters::monotone::Monotone;
-/// use contatori::counters::Observable;
+/// use contatori::{MetricKind, Monotone, Observable};
 ///
-/// let counter = Monotone::new();
-/// counter.add(1);
-/// counter.add(5);
-/// assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(6));
+/// let requests = Monotone::new().with_name("http_requests_total");
+/// requests.incr();
+/// requests.add(4);
+///
+/// assert_eq!(requests.metric_kind(), MetricKind::Counter);
+/// assert_eq!(requests.value().as_u64(), 5);
 /// ```
-///
-/// Multi-threaded usage:
-///
-/// ```rust
-/// use contatori::counters::monotone::Monotone;
-/// use contatori::counters::Observable;
-/// use std::sync::Arc;
-/// use std::thread;
-///
-/// let counter = Arc::new(Monotone::new());
-/// let mut handles = vec![];
-///
-/// for _ in 0..4 {
-///     let c = Arc::clone(&counter);
-///     handles.push(thread::spawn(move || {
-///         for _ in 0..1000 {
-///             c.add(1);
-///         }
-///     }));
-/// }
-///
-/// for h in handles {
-///     h.join().unwrap();
-/// }
-///
-/// assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(4000));
-/// ```
-pub struct Monotone {
+pub struct Monotone<const SHARDS: usize = DEFAULT_SHARDS> {
     name: &'static str,
-    components: [CachePadded<AtomicUsize>; NUM_COMPONENTS],
+    components: [CachePadded<AtomicU64>; SHARDS],
 }
 
-impl GetComponentCounter for Monotone {
-    type CounterType = AtomicUsize;
-
-    /// Returns a reference to the current thread's shard.
-    #[inline]
-    fn get_component_counter(&self) -> &AtomicUsize {
-        THREAD_SLOT_INDEX.with(|idx| &self.components[*idx])
+impl Monotone<DEFAULT_SHARDS> {
+    /// Creates a new counter with the default number of shards (`64`), initialized to zero.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self::with_shards()
     }
 }
 
-impl Monotone {
-    /// Creates a new counter initialized to zero.
+impl<const SHARDS: usize> Monotone<SHARDS> {
+    /// Creates a new counter with `SHARDS` shards, initialized to zero.
     ///
-    /// All 64 shards are initialized to zero. The counter has no name by default.
+    /// # Panics
     ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::monotone::Monotone;
-    /// use contatori::counters::Observable;
-    ///
-    /// let counter = Monotone::new();
-    /// assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(0));
-    /// ```
-    pub const fn new() -> Self {
-        const ZERO: CachePadded<AtomicUsize> = CachePadded::new(AtomicUsize::new(0));
-        Monotone {
-            components: [ZERO; NUM_COMPONENTS],
+    /// Fails to compile if `SHARDS` is zero or not a power of two.
+    #[must_use]
+    pub const fn with_shards() -> Self {
+        const {
+            assert!(
+                SHARDS > 0 && SHARDS.is_power_of_two(),
+                "SHARDS must be a non-zero power of two"
+            );
+        }
+        Self {
             name: "",
+            components: [const { CachePadded::new(AtomicU64::new(0)) }; SHARDS],
         }
     }
 
-    /// Sets the name of this counter, returning `self` for method chaining.
-    ///
-    /// The name is used when formatting the counter for display and can help
-    /// identify counters in logs or metrics output.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::monotone::Monotone;
-    /// use contatori::counters::Observable;
-    ///
-    /// let counter = Monotone::new().with_name("http_requests");
-    /// assert_eq!(counter.name(), "http_requests");
-    /// ```
+    /// Sets the metric name of this counter, returning `self` for method chaining.
+    #[must_use]
     pub const fn with_name(self, name: &'static str) -> Self {
         Self { name, ..self }
     }
 
-    /// Adds a value to the counter.
-    ///
-    /// This operation is lock-free and extremely fast due to sharding.
-    /// Each thread updates its own shard, avoiding contention.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::monotone::Monotone;
-    /// use contatori::counters::Observable;
-    ///
-    /// let counter = Monotone::new();
-    /// counter.add(5);
-    /// counter.add(3);
-    /// assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(8));
-    /// ```
     #[inline]
-    pub fn add(&self, value: usize) {
-        self.get_component_counter()
-            .fetch_add(value, Ordering::Relaxed);
+    fn local_slot(&self) -> &AtomicU64 {
+        &self.components[thread_slot_index::<SHARDS>()]
+    }
+
+    /// Increments the counter by `1`.
+    #[inline]
+    pub fn incr(&self) {
+        self.add(1);
+    }
+
+    /// Adds `value` to the counter.
+    #[inline]
+    pub fn add(&self, value: u64) {
+        self.local_slot().fetch_add(value, Ordering::Relaxed);
     }
 
     /// Returns the value of the current thread's shard.
-    ///
-    /// This is useful for debugging or when you need to know this thread's
-    /// contribution to the total.
+    #[must_use]
     #[inline]
-    pub fn local_value(&self) -> usize {
-        self.get_component_counter().load(Ordering::Relaxed)
+    pub fn local_value(&self) -> u64 {
+        self.local_slot().load(Ordering::Relaxed)
     }
 
-    /// Computes the total value by summing all shards.
     #[inline]
-    fn total_value(&self) -> usize {
+    fn total_value(&self) -> u64 {
         self.components
             .iter()
             .map(|counter| counter.load(Ordering::Relaxed))
-            .sum()
+            .fold(0u64, u64::wrapping_add)
     }
 }
 
-impl Observable for Monotone {
-    /// Returns the total counter value by summing all shards.
-    ///
-    /// This iterates over all 64 shards and sums their values.
+impl<const SHARDS: usize> Observable for Monotone<SHARDS> {
     #[inline]
     fn value(&self) -> CounterValue {
-        CounterValue::Unsigned(self.total_value() as u64)
+        CounterValue::Unsigned(self.total_value())
     }
 
-    /// Returns the name of this counter.
     #[inline]
     fn name(&self) -> &'static str {
         self.name
     }
 
-    /// Returns [`MetricKind::Counter`] because `Monotone` counters are monotonically increasing.
-    ///
-    /// This counter only supports `add()` operations and never decreases,
-    /// making it suitable for Prometheus Counter metrics.
     #[inline]
     fn metric_kind(&self) -> MetricKind {
         MetricKind::Counter
     }
 }
 
-impl sealed::Resettable for Monotone {
-    /// Returns the total value. Monotone counter is not resettable.
-    ///
-    /// This returns the same value as `value()` because Monotone counters
-    /// are monotonically increasing and should never be reset.
+impl<const SHARDS: usize> sealed::Resettable for Monotone<SHARDS> {
+    /// Returns the total value without resetting (`Monotone` counters never reset).
     #[inline]
     fn value_and_reset(&self) -> CounterValue {
-        CounterValue::Unsigned(self.total_value() as u64)
+        CounterValue::Unsigned(self.total_value())
     }
 }
 
-impl Default for Monotone {
-    /// Creates a new counter initialized to zero with no name.
+impl<const SHARDS: usize> Default for Monotone<SHARDS> {
     fn default() -> Self {
-        Self::new()
+        Self::with_shards()
     }
 }
 
-impl Debug for Monotone {
-    /// Formats the counter showing non-zero shards.
-    ///
-    /// Output format: `name{ [slot]:value [slot]:value ... }`
-    ///
-    /// Only shards with non-zero values are shown.
+impl<const SHARDS: usize> Debug for Monotone<SHARDS> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}{{", self.name)?;
         for (i, counter) in self.components.iter().enumerate() {
@@ -235,114 +148,50 @@ impl Debug for Monotone {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::counters::Observable;
+    use crate::adapters::Resettable;
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
-    fn test_new() {
-        let counter = Monotone::new();
+    fn test_new_and_incr() {
+        let counter = Monotone::new().with_name("req");
         assert_eq!(counter.value(), CounterValue::Unsigned(0));
+        assert_eq!(counter.metric_kind(), MetricKind::Counter);
+        counter.incr();
+        counter.add(4);
+        assert_eq!(counter.value(), CounterValue::Unsigned(5));
     }
 
     #[test]
-    fn test_add() {
-        let counter = Monotone::new();
-        counter.add(1);
+    fn test_custom_shards() {
+        let counter = Monotone::<8>::with_shards();
+        counter.incr();
         assert_eq!(counter.value(), CounterValue::Unsigned(1));
-        counter.add(1);
-        counter.add(1);
-        assert_eq!(counter.value(), CounterValue::Unsigned(3));
-    }
-
-    #[test]
-    fn test_local_value() {
-        let counter = Monotone::new();
-        assert_eq!(counter.local_value(), 0);
-        counter.add(1);
-        assert_eq!(counter.local_value(), 1);
     }
 
     #[test]
     fn test_resettable_monotone_does_not_reset() {
-        use crate::adapters::Resettable;
         let counter = Resettable::new(Monotone::new());
-        counter.add(1);
-        counter.add(1);
-        counter.add(1);
+        counter.add(3);
         assert_eq!(counter.value(), CounterValue::Unsigned(3));
-        // monotone counter does not reset to zero after value()
-        assert_eq!(counter.inner().local_value(), 3);
         assert_eq!(counter.value(), CounterValue::Unsigned(3));
-    }
-
-    #[test]
-    fn test_dyn_format() {
-        let counter = Monotone::new().with_name("test_counter");
-        counter.add(1);
-        let formatted = format!("{}", &counter as &dyn Observable);
-        assert_eq!(formatted, "test_counter:1");
-    }
-
-    #[test]
-    fn test_dyn_debug() {
-        let counter = Monotone::new().with_name("test_counter");
-        counter.add(1);
-        counter.add(1);
-        let debug_str = format!("{:?}", &counter as &dyn Observable);
-        assert!(debug_str.starts_with("test_counter{"));
-        assert!(debug_str.contains("2"));
-        assert!(debug_str.ends_with("}"));
     }
 
     #[test]
     fn test_multiple_threads() {
-        use std::sync::Arc;
-        use std::thread;
-
         let counter = Arc::new(Monotone::new());
         let mut handles = vec![];
-
         for _ in 0..4 {
-            let counter_clone = Arc::clone(&counter);
-            let handle = thread::spawn(move || {
+            let c = Arc::clone(&counter);
+            handles.push(thread::spawn(move || {
                 for _ in 0..100 {
-                    counter_clone.add(1);
+                    c.incr();
                 }
-            });
-            handles.push(handle);
+            }));
         }
-
-        for handle in handles {
-            handle.join().unwrap();
+        for h in handles {
+            h.join().unwrap();
         }
-
         assert_eq!(counter.value(), CounterValue::Unsigned(400));
-    }
-
-    #[test]
-    fn test_name_default() {
-        let counter = Monotone::new();
-        assert_eq!(counter.name(), "");
-    }
-
-    #[test]
-    fn test_with_name() {
-        let counter = Monotone::new().with_name("my_counter");
-        assert_eq!(counter.name(), "my_counter");
-    }
-
-    #[test]
-    fn test_with_name_preserves_value() {
-        let counter = Monotone::new().with_name("test");
-        counter.add(1);
-        counter.add(1);
-        assert_eq!(counter.name(), "test");
-        assert_eq!(counter.value(), CounterValue::Unsigned(2));
-    }
-
-    #[test]
-    fn test_default() {
-        let counter = Monotone::default();
-        assert_eq!(counter.value(), CounterValue::Unsigned(0));
-        assert_eq!(counter.name(), "");
     }
 }

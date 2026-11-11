@@ -1,72 +1,141 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::thread;
+//! Benchmark comparing `contatori::Unsigned` (sharded `AtomicU64`) against a single `AtomicU64`.
+//!
+//! Worker threads are spawned once outside the Criterion measurement window and synchronized
+//! with barriers so that OS thread creation/teardown overhead is completely excluded.
+//!
+//! Run with:
+//! ```bash
+//! cargo bench --bench contatori_vs_atomic
+//! ```
 
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use contatori::{Observable, Unsigned};
+use criterion::{
+    BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
+};
 
 const NUM_THREADS: usize = 8;
-const ITERATIONS_PER_THREAD: usize = 1_000_000;
+const OPS_PER_BATCH: u64 = 100_000;
+
+/// Persistent barrier-synchronized worker pool that executes `f(thread_id, total_ops)`
+/// across `NUM_THREADS` threads without spawning/joining inside the timed region.
+struct BenchPool {
+    iters: Arc<AtomicU64>,
+    shutdown: Arc<AtomicBool>,
+    start_barrier: Arc<Barrier>,
+    end_barrier: Arc<Barrier>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl BenchPool {
+    fn new<F>(num_threads: usize, f: F) -> Self
+    where
+        F: Fn(usize, u64) + Send + Sync + 'static,
+    {
+        let iters = Arc::new(AtomicU64::new(0));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let start_barrier = Arc::new(Barrier::new(num_threads + 1));
+        let end_barrier = Arc::new(Barrier::new(num_threads + 1));
+        let f = Arc::new(f);
+
+        let mut handles = Vec::with_capacity(num_threads);
+        for thread_id in 0..num_threads {
+            let iters = Arc::clone(&iters);
+            let shutdown = Arc::clone(&shutdown);
+            let start_barrier = Arc::clone(&start_barrier);
+            let end_barrier = Arc::clone(&end_barrier);
+            let f = Arc::clone(&f);
+
+            handles.push(thread::spawn(move || {
+                loop {
+                    start_barrier.wait();
+                    if shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let total_ops = iters.load(Ordering::Relaxed) * OPS_PER_BATCH;
+                    f(thread_id, total_ops);
+                    end_barrier.wait();
+                }
+            }));
+        }
+
+        Self {
+            iters,
+            shutdown,
+            start_barrier,
+            end_barrier,
+            handles,
+        }
+    }
+
+    fn run_batch(&self, batch_iters: u64) -> Duration {
+        self.iters.store(batch_iters, Ordering::Relaxed);
+        self.start_barrier.wait();
+        let start = Instant::now();
+        self.end_barrier.wait();
+        start.elapsed()
+    }
+}
+
+impl Drop for BenchPool {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.start_barrier.wait();
+        for handle in self.handles.drain(..) {
+            handle.join().unwrap();
+        }
+    }
+}
 
 fn bench_unsigned_counter(c: &mut Criterion) {
     let mut group = c.benchmark_group("counter_increment");
+    group.throughput(Throughput::Elements(NUM_THREADS as u64 * OPS_PER_BATCH));
 
     group.bench_function(
         BenchmarkId::new(
-            "Unsigned (sharded)",
-            format!("{}threads x {}iter", NUM_THREADS, ITERATIONS_PER_THREAD),
+            "Unsigned (sharded AtomicU64)",
+            format!("{NUM_THREADS}threads x {OPS_PER_BATCH}ops"),
         ),
         |b| {
-            b.iter(|| {
-                let counter = Arc::new(Unsigned::new());
-                let mut handles = vec![];
-
-                for _ in 0..NUM_THREADS {
-                    let counter_clone = Arc::clone(&counter);
-                    let handle = thread::spawn(move || {
-                        for _ in 0..ITERATIONS_PER_THREAD {
-                            counter_clone.add(1);
-                        }
-                    });
-                    handles.push(handle);
+            let counter = Arc::new(Unsigned::new());
+            let worker_counter = Arc::clone(&counter);
+            let pool = BenchPool::new(NUM_THREADS, move |_, total_ops| {
+                for _ in 0..total_ops {
+                    worker_counter.add(black_box(1));
                 }
+            });
 
-                for handle in handles {
-                    handle.join().unwrap();
-                }
-
-                black_box(counter.value())
-            })
+            b.iter_custom(|iters| {
+                let elapsed = pool.run_batch(iters);
+                black_box(counter.value());
+                elapsed
+            });
         },
     );
 
     group.bench_function(
         BenchmarkId::new(
-            "AtomicUsize (single)",
-            format!("{}threads x {}iter", NUM_THREADS, ITERATIONS_PER_THREAD),
+            "AtomicU64 (single contended)",
+            format!("{NUM_THREADS}threads x {OPS_PER_BATCH}ops"),
         ),
         |b| {
-            b.iter(|| {
-                let counter = Arc::new(AtomicUsize::new(0));
-                let mut handles = vec![];
-
-                for _ in 0..NUM_THREADS {
-                    let counter_clone = Arc::clone(&counter);
-                    let handle = thread::spawn(move || {
-                        for _ in 0..ITERATIONS_PER_THREAD {
-                            counter_clone.fetch_add(1, Ordering::Relaxed);
-                        }
-                    });
-                    handles.push(handle);
+            let counter = Arc::new(AtomicU64::new(0));
+            let worker_counter = Arc::clone(&counter);
+            let pool = BenchPool::new(NUM_THREADS, move |_, total_ops| {
+                for _ in 0..total_ops {
+                    worker_counter.fetch_add(black_box(1), Ordering::Relaxed);
                 }
+            });
 
-                for handle in handles {
-                    handle.join().unwrap();
-                }
-
-                black_box(counter.load(Ordering::Relaxed))
-            })
+            b.iter_custom(|iters| {
+                let elapsed = pool.run_batch(iters);
+                black_box(counter.load(Ordering::Relaxed));
+                elapsed
+            });
         },
     );
 

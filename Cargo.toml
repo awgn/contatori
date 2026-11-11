@@ -1,7 +1,8 @@
 [package]
 name = "contatori"
-version = "0.7.5"
-edition = "2021"
+version = "0.8.0"
+edition = "2024"
+rust-version = "1.85"
 authors = ["Nicola Bonelli <nicola.bonelli@gmail.com>"]
 description = "High-performance sharded atomic counters for Rust"
 license = "MIT"
@@ -18,13 +19,10 @@ json = ["serde", "dep:serde_json"]
 prometheus = ["dep:prometheus"]
 opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk"]
 full = ["table", "json", "prometheus", "opentelemetry"]
-demo = ["full", "clap"]
+demo = ["full", "dep:clap"]
 
 [dependencies]
-atomic-traits = "0.4.0"
-bytemuck = "1.24.0"
 crossbeam-utils = "0.8.21"
-num-traits = "0.2.19"
 
 # Optional dependencies for observers
 tabled = { version = "0.20", optional = true }
@@ -34,8 +32,6 @@ clap = { version = "4.5", features = ["derive"], optional = true }
 prometheus = { version = "0.14", optional = true }
 opentelemetry = { version = "0.27", optional = true }
 opentelemetry_sdk = { version = "0.27", optional = true }
-thiserror = "2.0"
-atomic-time = "0.1.5"
 
 [dev-dependencies]
 criterion = "0.5"

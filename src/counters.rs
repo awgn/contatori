@@ -9,36 +9,27 @@
 //! The sharding system works as follows:
 //!
 //! 1. A global atomic counter (`NEXT_SLOT_ID`) assigns sequential IDs to threads
-//! 2. Each thread stores its assigned slot index in thread-local storage
-//! 3. The slot index is used modulo `NUM_COMPONENTS` (64) to select which
-//!    shard a thread writes to
-//! 4. Each shard is cache-line padded to prevent false sharing
+//! 2. Each thread caches its assigned ID in thread-local storage (`Cell<usize>`)
+//! 3. Each counter masks the ID with `(SHARDS - 1)` (where `SHARDS` is a power of two,
+//!    64 by default) to select which shard a thread writes to
+//! 4. Each shard is cache-line padded (`CachePadded`, 128-byte aligned on x86_64/aarch64)
+//!    to prevent false sharing
 //!
 //! ```text
 //!                          ┌─────────────────────────────────────┐
 //!                          │         Counter Structure           │
 //!                          ├─────────────────────────────────────┤
-//!   Thread 0 ──writes──►   │ [Slot 0] ████████ (CachePadded)     │
-//!   Thread 1 ──writes──►   │ [Slot 1] ████████ (CachePadded)     │
-//!   Thread 2 ──writes──►   │ [Slot 2] ████████ (CachePadded)     │
+//!   Thread 0 ──writes──►   │ [Slot 0]  ████████ (CachePadded)    │
+//!   Thread 1 ──writes──►   │ [Slot 1]  ████████ (CachePadded)    │
+//!   Thread 2 ──writes──►   │ [Slot 2]  ████████ (CachePadded)    │
 //!        ...               │    ...                              │
-//!   Thread 63 ─writes──►   │ [Slot 63] ███████ (CachePadded)     │
+//!   Thread 63 ─writes──►   │ [Slot 63] ████████ (CachePadded)    │
 //!                          └─────────────────────────────────────┘
 //!                                          │
 //!                                          ▼
 //!                                   value() aggregates
 //!                                   all slots on read
 //! ```
-//!
-//! # Thread Slot Assignment
-//!
-//! Slots are assigned round-robin: the first thread gets slot 0, the second
-//! gets slot 1, and so on. After 64 threads, assignment wraps around (thread 64
-//! shares slot 0 with thread 0). This is acceptable because:
-//!
-//! - Most applications have fewer than 64 concurrent threads updating counters
-//! - Even with slot sharing, contention is reduced by 64x compared to a single atomic
-//! - The assignment is deterministic and stable for the thread's lifetime
 
 pub mod average;
 pub mod maximum;
@@ -48,57 +39,77 @@ pub mod rate;
 pub mod signed;
 pub mod unsigned;
 
-use atomic_traits::Atomic;
-use num_traits::Zero;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::{
-    fmt::Debug,
-    fmt::Display,
+    cell::Cell,
+    fmt::{Debug, Display},
+    ops::{Add, AddAssign, Sub, SubAssign},
     sync::atomic::{AtomicUsize, Ordering},
-    ops::{Add, AddAssign, Sub, SubAssign}
 };
 
-/// Number of shards (slots) used by each counter.
+/// Default number of shards (slots) used by each counter.
 ///
-/// This value is chosen to:
-/// - Be large enough to minimize contention (64 threads can update without any contention)
-/// - Be a power of 2 for efficient modulo operations
-/// - Balance memory usage (~4KB per counter) with performance benefits
-///
-/// Each slot is cache-line padded (64 bytes), so total memory per counter is:
-/// `64 slots × 64 bytes = 4,096 bytes (4KB)`
-pub(crate) const NUM_COMPONENTS: usize = 128;
+/// Must be a non-zero power of two. With 64 shards and 128-byte cache-line
+/// padding (`CachePadded` on `x86_64` and `aarch64`), each counter occupies
+/// approximately 8 KB of memory while allowing up to 64 threads to update
+/// concurrently with zero cache-line contention.
+pub const DEFAULT_SHARDS: usize = 64;
 
-/// Global counter for assigning slot IDs to threads.
-///
-/// This is incremented atomically each time a new thread accesses any counter,
-/// ensuring each thread gets a unique slot (modulo `NUM_COMPONENTS`).
+/// Global counter for assigning sequential IDs to threads.
 static NEXT_SLOT_ID: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
-    /// Thread-local slot index assigned to the current thread.
+    /// Thread-local raw ID assigned to the current thread.
     ///
-    /// Initialized lazily on first access to any counter operation.
-    /// The value is stable for the lifetime of the thread.
-    pub(crate) static THREAD_SLOT_INDEX: usize = get_next_slot_id();
+    /// Uses `usize::MAX` as the uninitialized sentinel so TLS initialization
+    /// is `const` and fast on the hot path.
+    static THREAD_SLOT_ID: Cell<usize> = const { Cell::new(usize::MAX) };
 }
 
-/// Assigns the next available slot ID to a thread.
+#[cold]
+#[inline(never)]
+fn init_thread_slot_id(cell: &Cell<usize>) -> usize {
+    let raw = NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed);
+    // Reserve usize::MAX as the uninitialized sentinel.
+    let id = if raw == usize::MAX {
+        NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed)
+    } else {
+        raw
+    };
+    cell.set(id);
+    id
+}
+
+/// Returns the current thread's shard index in `[0, SHARDS)`.
 ///
-/// Called once per thread (lazily) when the thread first accesses a counter.
-/// The returned value is in the range `[0, NUM_COMPONENTS)`.
-///
-/// # Thread Safety
-///
-/// Uses `Ordering::Relaxed` because we only need atomicity, not synchronization.
-/// It's acceptable if two threads occasionally get the same slot ID due to
-/// reordering - this slightly increases contention but doesn't affect correctness.
+/// Compile-time panics if `SHARDS` is zero or not a power of two.
+#[inline]
+pub(crate) fn thread_slot_index<const SHARDS: usize>() -> usize {
+    const {
+        assert!(
+            SHARDS > 0 && SHARDS.is_power_of_two(),
+            "SHARDS must be a non-zero power of two"
+        );
+    }
+    let id = THREAD_SLOT_ID.with(|cell| {
+        let v = cell.get();
+        if v != usize::MAX {
+            v
+        } else {
+            init_thread_slot_id(cell)
+        }
+    });
+    id & (SHARDS - 1)
+}
+
+/// Assigns the next available slot ID modulo [`DEFAULT_SHARDS`].
+#[inline]
 pub fn get_next_slot_id() -> usize {
-    NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed) % NUM_COMPONENTS
+    NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed) & (DEFAULT_SHARDS - 1)
 }
 
-/// Represents the value of a counter, supporting both signed and unsigned types.
+/// Represents the value of a counter, supporting unsigned, signed, and floating-point types.
 ///
 /// This enum allows the [`Observable`] trait to return values from counters
 /// of different underlying types through a unified interface.
@@ -106,33 +117,56 @@ pub fn get_next_slot_id() -> usize {
 /// # Examples
 ///
 /// ```rust
-/// use contatori::counters::CounterValue;
+/// use contatori::CounterValue;
 ///
 /// let unsigned = CounterValue::Unsigned(42);
 /// let signed = CounterValue::Signed(-10);
+/// let float = CounterValue::Float(3.5);
 ///
 /// assert!(!unsigned.is_zero());
 /// assert!(!signed.is_zero());
+/// assert!(!float.is_zero());
 /// assert!(CounterValue::Unsigned(0).is_zero());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
 pub enum CounterValue {
-    /// An unsigned 64-bit counter value.
+    /// An unsigned 64-bit integer counter value.
     Unsigned(u64),
-    /// A signed 64-bit counter value.
+    /// A signed 64-bit integer counter value.
     Signed(i64),
-    /// An unsigned 64-bit counter value.
+    /// A 64-bit floating-point counter value.
     Float(f64),
+}
+
+impl From<u64> for CounterValue {
+    #[inline]
+    fn from(v: u64) -> Self {
+        Self::Unsigned(v)
+    }
+}
+
+impl From<i64> for CounterValue {
+    #[inline]
+    fn from(v: i64) -> Self {
+        Self::Signed(v)
+    }
+}
+
+impl From<f64> for CounterValue {
+    #[inline]
+    fn from(v: f64) -> Self {
+        Self::Float(v)
+    }
 }
 
 impl Display for CounterValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CounterValue::Unsigned(v) => write!(f, "{}", v),
-            CounterValue::Signed(v) => write!(f, "{}", v),
-            CounterValue::Float(v) => write!(f, "{}", v),
+            CounterValue::Unsigned(v) => write!(f, "{v}"),
+            CounterValue::Signed(v) => write!(f, "{v}"),
+            CounterValue::Float(v) => write!(f, "{v}"),
         }
     }
 }
@@ -143,9 +177,9 @@ impl Add for CounterValue {
     fn add(self, other: Self) -> Self::Output {
         use CounterValue::*;
         match (self, other) {
-            // Same type: keep the original type
-            (Unsigned(a), Unsigned(b)) => Unsigned(a.wrapping_add(b)), // using wrapping to avoid panic in debug
-            (Signed(a), Signed(b)) => Signed(a + b),
+            // Same type: keep the original type using wrapping integer arithmetic
+            (Unsigned(a), Unsigned(b)) => Unsigned(a.wrapping_add(b)),
+            (Signed(a), Signed(b)) => Signed(a.wrapping_add(b)),
             (Float(a), Float(b)) => Float(a + b),
 
             // Float mixes: always promote to Float
@@ -154,9 +188,9 @@ impl Add for CounterValue {
             (Float(a), Signed(b)) => Float(a + b as f64),
             (Signed(a), Float(b)) => Float(a as f64 + b),
 
-            // Signed/Unsigned mixes: promote to Signed
-            (Signed(a), Unsigned(b)) => Signed(a + b as i64),
-            (Unsigned(a), Signed(b)) => Signed(a as i64 + b),
+            // Signed/Unsigned mixes: promote to Signed using wrapping arithmetic
+            (Signed(a), Unsigned(b)) => Signed(a.wrapping_add(b as i64)),
+            (Unsigned(a), Signed(b)) => Signed((a as i64).wrapping_add(b)),
         }
     }
 }
@@ -167,9 +201,9 @@ impl Sub for CounterValue {
     fn sub(self, other: Self) -> Self::Output {
         use CounterValue::*;
         match (self, other) {
-            // Same type
+            // Same type: keep the original type using wrapping integer arithmetic
             (Unsigned(a), Unsigned(b)) => Unsigned(a.wrapping_sub(b)),
-            (Signed(a), Signed(b)) => Signed(a - b),
+            (Signed(a), Signed(b)) => Signed(a.wrapping_sub(b)),
             (Float(a), Float(b)) => Float(a - b),
 
             // Float mixes
@@ -178,9 +212,9 @@ impl Sub for CounterValue {
             (Float(a), Signed(b)) => Float(a - b as f64),
             (Signed(a), Float(b)) => Float(a as f64 - b),
 
-            // Signed/Unsigned mixes: promote to Signed
-            (Signed(a), Unsigned(b)) => Signed(a - b as i64),
-            (Unsigned(a), Signed(b)) => Signed(a as i64 - b),
+            // Signed/Unsigned mixes: promote to Signed using wrapping arithmetic
+            (Signed(a), Unsigned(b)) => Signed(a.wrapping_sub(b as i64)),
+            (Unsigned(a), Signed(b)) => Signed((a as i64).wrapping_sub(b)),
         }
     }
 }
@@ -203,31 +237,27 @@ impl CounterValue {
     /// # Examples
     ///
     /// ```rust
-    /// use contatori::counters::CounterValue;
+    /// use contatori::CounterValue;
     ///
     /// assert!(CounterValue::Unsigned(0).is_zero());
     /// assert!(CounterValue::Signed(0).is_zero());
+    /// assert!(CounterValue::Float(0.0).is_zero());
     /// assert!(!CounterValue::Unsigned(1).is_zero());
     /// assert!(!CounterValue::Signed(-1).is_zero());
     /// ```
+    #[must_use]
+    #[inline]
     pub fn is_zero(&self) -> bool {
         match self {
             CounterValue::Unsigned(v) => *v == 0,
             CounterValue::Signed(v) => *v == 0,
-            CounterValue::Float(v) => v.is_zero(),
+            CounterValue::Float(v) => *v == 0.0,
         }
     }
 
-    /// Returns the value as an `i64`, converting unsigned to signed if necessary.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::CounterValue;
-    ///
-    /// assert_eq!(CounterValue::Unsigned(100).as_i64(), 100);
-    /// assert_eq!(CounterValue::Signed(-50).as_i64(), -50);
-    /// ```
+    /// Returns the value as an `i64`, converting unsigned or float if necessary.
+    #[must_use]
+    #[inline]
     pub fn as_i64(&self) -> i64 {
         match self {
             CounterValue::Unsigned(v) => *v as i64,
@@ -236,18 +266,11 @@ impl CounterValue {
         }
     }
 
-    /// Returns the value as a `u64`, converting signed to unsigned if necessary.
+    /// Returns the value as a `u64`, converting signed or float if necessary.
     ///
-    /// Note: Negative values will wrap around.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::CounterValue;
-    ///
-    /// assert_eq!(CounterValue::Unsigned(100).as_u64(), 100);
-    /// assert_eq!(CounterValue::Signed(50).as_u64(), 50);
-    /// ```
+    /// Note: Negative signed values wrap around when cast to `u64`.
+    #[must_use]
+    #[inline]
     pub fn as_u64(&self) -> u64 {
         match self {
             CounterValue::Unsigned(v) => *v,
@@ -257,15 +280,8 @@ impl CounterValue {
     }
 
     /// Returns the value as an `f64`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::CounterValue;
-    ///
-    /// assert_eq!(CounterValue::Unsigned(100).as_f64(), 100.0);
-    /// assert_eq!(CounterValue::Signed(-50).as_f64(), -50.0);
-    /// ```
+    #[must_use]
+    #[inline]
     pub fn as_f64(&self) -> f64 {
         match self {
             CounterValue::Unsigned(v) => *v as f64,
@@ -277,193 +293,93 @@ impl CounterValue {
 
 /// The kind of metric a counter represents.
 ///
-/// This is used by observers (like Prometheus) to determine how to export
-/// the metric with the correct type semantics.
-///
-/// # Examples
-///
-/// ```rust
-/// use contatori::counters::{Observable, MetricKind};
-/// use contatori::counters::monotone::Monotone;
-/// use contatori::counters::unsigned::Unsigned;
-///
-/// // Monotone counters are exported as Counter (monotonically increasing)
-/// let requests = Monotone::new();
-/// assert_eq!(requests.metric_kind(), MetricKind::Counter);
-///
-/// // Unsigned counters are exported as Gauge (can go up or down when reset)
-/// let connections = Unsigned::new();
-/// assert_eq!(connections.metric_kind(), MetricKind::Gauge);
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Used by observers (such as Prometheus and OpenTelemetry) to export the metric
+/// with the appropriate semantic instrument type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum MetricKind {
     /// A gauge is a metric that can go up and down.
-    ///
-    /// Use for values like current connections, temperature, queue size.
-    /// Most counter types in this crate are gauges because they can be reset.
     #[default]
     Gauge,
 
     /// A counter is a cumulative metric that only ever goes up.
-    ///
-    /// Use for values like total requests, errors, bytes sent.
-    /// Only [`Monotone`](crate::counters::monotone::Monotone) counters are true counters.
     Counter,
 
     /// A histogram samples observations and counts them in buckets.
     ///
-    /// Use for values like request latencies, response sizes.
-    /// **Not yet supported** - reserved for future use.
+    /// Reserved for sharded histogram support.
     Histogram,
 }
 
-/// Represents a single observable entry with its metadata.
+/// Represents a single observable metric entry with its metadata and labels.
 ///
-/// This struct is returned by [`Observable::expand()`] and contains all the
-/// information needed to export a metric: name, labels, value, and kind.
-///
-/// For single counters, `expand()` returns one entry.
-/// For labeled groups, `expand()` returns multiple entries (one per sub-counter).
-#[derive(Debug, Clone)]
+/// Returned via [`Observable::expand_into()`] / [`Observable::expand()`].
+#[derive(Debug, Clone, PartialEq)]
 pub struct ObservableEntry {
-    /// The metric name (e.g., "http_requests")
+    /// The metric name (e.g., `"http_requests_total"`).
     pub name: &'static str,
-    /// Optional label as (key, value) pair (e.g., ("method", "GET"))
-    pub label: Option<(&'static str, &'static str)>,
-    /// The counter value
-    pub value: CounterValue,
-    /// The kind of metric (Counter, Gauge, etc.)
+    /// Static slice of `(key, value)` label pairs (empty `&[]` when unlabeled).
+    pub labels: &'static [(&'static str, &'static str)],
+    /// Current counter value, or `None` if no observations have been recorded yet
+    /// (for statistical trackers like [`Minimum`](minimum::Minimum),
+    /// [`Maximum`](maximum::Maximum), and [`Average`](average::Average)).
+    pub value: Option<CounterValue>,
+    /// Semantic kind of metric (`Counter`, `Gauge`, `Histogram`).
     pub metric_kind: MetricKind,
 }
 
-/// A trait for types that can be observed to retrieve their current value.
+/// A trait for types that can be observed to retrieve their current value(s).
 ///
-/// This trait provides a common interface for all counter types, allowing
-/// them to be used interchangeably when reading values or collecting metrics.
-///
-/// # Implementors
-///
-/// All counter types in this crate implement `Observable`:
-/// - [`Unsigned`](unsigned::Unsigned) - returns `CounterValue::Unsigned`
-/// - [`Signed`](signed::Signed) - returns `CounterValue::Signed`
-/// - [`Minimum`](minimum::Minimum) - returns `CounterValue::Unsigned`
-/// - [`Maximum`](maximum::Maximum) - returns `CounterValue::Unsigned`
-/// - [`Average`](average::Average) - returns `CounterValue::Unsigned` (the computed average)
-///
-/// # Resetting Counters
-///
-/// The `value()` method behavior depends on the counter type:
-///
-/// - **Raw counters** (Unsigned, Signed, etc.): `value()` returns the current value
-///   without resetting.
-/// - **Resettable counters**: When wrapped with [`Resettable`](crate::adapters::Resettable),
-///   `value()` returns the current value AND resets the counter atomically.
-///
-/// ```rust
-/// use contatori::counters::Observable;
-/// use contatori::counters::unsigned::Unsigned;
-/// use contatori::adapters::Resettable;
-///
-/// // Regular counter: value() does not reset
-/// let counter = Unsigned::new();
-/// counter.add(5);
-/// assert_eq!(counter.value().as_u64(), 5);
-/// assert_eq!(counter.value().as_u64(), 5); // Still 5
-///
-/// // Resettable counter: value() resets after reading
-/// let resettable = Resettable::new(Unsigned::new());
-/// resettable.add(5);
-/// assert_eq!(resettable.value().as_u64(), 5);
-/// assert_eq!(resettable.value().as_u64(), 0); // Reset to 0
-/// ```
-pub trait Observable: Debug {
-    /// Returns the name of this counter.
-    ///
-    /// The name is typically a static string set at counter creation time
-    /// using the `with_name()` builder method. Returns an empty string if
-    /// no name was set.
+/// All counter types and adapters in `contatori` are thread-safe (`Send + Sync`)
+/// and implement `Observable`.
+pub trait Observable: Debug + Send + Sync {
+    /// Returns the static name of this counter, or `""` if unnamed.
     fn name(&self) -> &'static str;
 
-    /// Returns the kind of metric this counter represents.
-    ///
-    /// This is used by observers (like Prometheus) to determine how to
-    /// export the metric:
-    ///
-    /// - [`MetricKind::Counter`] → monotonically increasing values
-    /// - [`MetricKind::Gauge`] → values that can go up or down
-    /// - [`MetricKind::Histogram`] → distributions (not yet supported)
-    ///
-    /// The default implementation returns [`MetricKind::Gauge`], which is
-    /// appropriate for most counter types.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use contatori::counters::monotone::Monotone;
-    /// use contatori::counters::unsigned::Unsigned;
-    /// use contatori::counters::{Observable, MetricKind};
-    ///
-    /// let monotone = Monotone::new();
-    /// assert_eq!(monotone.metric_kind(), MetricKind::Counter);
-    ///
-    /// let unsigned = Unsigned::new();
-    /// assert_eq!(unsigned.metric_kind(), MetricKind::Gauge);
-    /// ```
+    /// Returns the semantic kind of metric this counter represents.
     fn metric_kind(&self) -> MetricKind {
         MetricKind::Gauge
     }
 
     /// Returns the current aggregated value of the counter.
     ///
-    /// This method reads all shards and computes the aggregate value
-    /// (sum for counters, min/max for extrema, average for Average).
-    ///
-    /// For raw counters, this does **not** reset the counter.
-    /// For counters wrapped with [`Resettable`](crate::adapters::Resettable),
-    /// this returns the value AND resets the counter.
-    ///
-    /// # Performance
-    ///
-    /// Reading requires iterating over all 64 shards, making it more
-    /// expensive than a single atomic read. However, this is the right
-    /// trade-off for counters where writes vastly outnumber reads.
+    /// Trackers without any recorded observations return zero (`0` or `0.0`).
+    /// Use [`try_value()`](Self::try_value) to check whether at least one
+    /// observation has been recorded.
     fn value(&self) -> CounterValue;
 
-    /// Expands this observable into one or more entries.
+    /// Returns `Some(value)` if the counter has a value, or `None` if no
+    /// observations have been recorded yet.
     ///
-    /// This is the primary method used by observers to collect metrics.
+    /// Observers use this method (via [`expand_into()`](Self::expand_into)) to
+    /// omit uninitialized statistical trackers instead of emitting placeholder values.
+    fn try_value(&self) -> Option<CounterValue> {
+        Some(self.value())
+    }
+
+    /// Appends all entries for this observable into `out`.
     ///
-    /// - For single counters: returns one entry with this counter's data
-    /// - For labeled groups: returns one entry per sub-counter
-    ///
-    /// The default implementation returns a single entry for `self`.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use contatori::counters::Observable;
-    /// use contatori::counters::unsigned::Unsigned;
-    ///
-    /// let counter = Unsigned::new().with_name("requests");
-    /// counter.add(100);
-    ///
-    /// let entries = counter.expand();
-    /// assert_eq!(entries.len(), 1);
-    /// assert_eq!(entries[0].name, "requests");
-    /// assert_eq!(entries[0].value.as_u64(), 100);
-    /// ```
-    fn expand(&self) -> Vec<ObservableEntry> {
-        vec![ObservableEntry {
+    /// Using `expand_into` allows observers to reuse a single `Vec` buffer across
+    /// an entire collection pass without per-counter heap allocations.
+    fn expand_into(&self, out: &mut Vec<ObservableEntry>) {
+        out.push(ObservableEntry {
             name: self.name(),
-            label: None,
-            value: self.value(),
+            labels: &[],
+            value: self.try_value(),
             metric_kind: self.metric_kind(),
-        }]
+        });
+    }
+
+    /// Expands this observable into a freshly allocated vector of entries.
+    fn expand(&self) -> Vec<ObservableEntry> {
+        let mut out = Vec::with_capacity(1);
+        self.expand_into(&mut out);
+        out
     }
 }
 
 impl Display for dyn Observable + '_ {
-    /// Formats the counter as `name:value` if named, or just `value` otherwise.
+    /// Formats the counter as `name:value` if named, or `value` otherwise.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if !self.name().is_empty() {
             write!(f, "{}:{}", self.name(), self.value())
@@ -473,58 +389,51 @@ impl Display for dyn Observable + '_ {
     }
 }
 
-/// Internal sealed module for reset functionality.
+/// Internal sealed module for read-and-reset functionality.
 ///
-/// This module contains the internal trait used by the `Resettable` adapter
-/// to access the reset functionality of counters. It is not part of the public API.
-pub(crate) mod sealed {
-    use super::{CounterValue, Observable};
+/// Exposed as `#[doc(hidden)] pub` only so that the exported [`labeled_group!`](crate::labeled_group)
+/// macro can implement `Resettable` for user-defined group structs in downstream crates.
+#[doc(hidden)]
+pub mod sealed {
+    use super::{CounterValue, Observable, ObservableEntry};
 
-    /// Internal trait for counters that support atomic read-and-reset.
-    ///
-    /// This trait is implemented by all counter types and is used by the
-    /// `Resettable` adapter to perform the reset operation when `value()` is called.
-    ///
-    /// This trait is intentionally not public - the reset behavior is only
-    /// accessible through the `Resettable` wrapper.
+    /// Internal trait for counters and groups that support read-and-reset.
     pub trait Resettable: Observable {
-        /// Returns the current value and resets the counter atomically.
-        ///
-        /// # Atomicity Note
-        ///
-        /// While each individual shard is reset atomically, the aggregate
-        /// operation across all shards is not atomic. This means concurrent
-        /// updates during this method may be partially included in
-        /// either the returned value or the next collection period. For
-        /// metrics and statistics, this is typically acceptable.
+        /// Returns the current value (or zero fallback) and resets the counter.
         fn value_and_reset(&self) -> CounterValue;
+
+        /// Returns `Some(value)` and resets the counter, or `None` if unobserved.
+        fn try_value_and_reset(&self) -> Option<CounterValue> {
+            Some(self.value_and_reset())
+        }
+
+        /// Appends reset entries into `out`.
+        fn expand_and_reset_into(&self, out: &mut Vec<ObservableEntry>) {
+            out.push(ObservableEntry {
+                name: self.name(),
+                labels: &[],
+                value: self.try_value_and_reset(),
+                metric_kind: self.metric_kind(),
+            });
+        }
     }
-}
-
-/// Internal trait for accessing the thread-local component of a sharded counter.
-///
-/// This trait is used by counter implementations to get a reference to the
-/// atomic value in the current thread's assigned shard.
-///
-/// # Safety
-///
-/// Implementors must ensure that the returned reference points to the correct
-/// shard based on the thread's assigned slot index.
-pub trait GetComponentCounter {
-    /// The atomic type used for individual shards.
-    type CounterType: Atomic;
-
-    /// Returns a reference to the current thread's shard.
-    ///
-    /// This should use `THREAD_SLOT_INDEX` to determine which shard to return.
-    fn get_component_counter(&self) -> &Self::CounterType;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::CounterValue;
+    use super::{CounterValue, thread_slot_index};
 
-    // ==================== Add Tests ====================
+    #[test]
+    fn thread_slot_masks_correctly_for_multiple_shard_counts() {
+        let idx16 = thread_slot_index::<16>();
+        let idx64 = thread_slot_index::<64>();
+        let idx128 = thread_slot_index::<128>();
+        assert!(idx16 < 16);
+        assert!(idx64 < 64);
+        assert!(idx128 < 128);
+        assert_eq!(idx16, idx64 & 15);
+        assert_eq!(idx64, idx128 & 63);
+    }
 
     #[test]
     fn add_unsigned_unsigned() {
@@ -534,10 +443,16 @@ mod tests {
     }
 
     #[test]
-    fn add_signed_signed() {
+    fn add_signed_signed_and_wrapping_overflow() {
         let a = CounterValue::Signed(-10);
         let b = CounterValue::Signed(20);
         assert!(matches!(a + b, CounterValue::Signed(10)));
+
+        let max = CounterValue::Signed(i64::MAX);
+        assert!(matches!(
+            max + CounterValue::Signed(1),
+            CounterValue::Signed(i64::MIN)
+        ));
     }
 
     #[test]
@@ -551,293 +466,50 @@ mod tests {
     }
 
     #[test]
-    fn add_unsigned_signed_promotes_to_signed() {
-        let a = CounterValue::Unsigned(10);
-        let b = CounterValue::Signed(-3);
-        assert!(matches!(a + b, CounterValue::Signed(7)));
+    fn add_mixed_promotions() {
+        assert_eq!(
+            CounterValue::Unsigned(10) + CounterValue::Signed(-3),
+            CounterValue::Signed(7)
+        );
+        assert_eq!(
+            CounterValue::Signed(-5) + CounterValue::Unsigned(15),
+            CounterValue::Signed(10)
+        );
+        assert_eq!(
+            CounterValue::Float(1.5) + CounterValue::Unsigned(2),
+            CounterValue::Float(3.5)
+        );
+        assert_eq!(
+            CounterValue::Signed(-2) + CounterValue::Float(5.0),
+            CounterValue::Float(3.0)
+        );
     }
 
     #[test]
-    fn add_signed_unsigned_promotes_to_signed() {
-        let a = CounterValue::Signed(-5);
-        let b = CounterValue::Unsigned(15);
-        assert!(matches!(a + b, CounterValue::Signed(10)));
+    fn sub_mixed_and_wrapping() {
+        assert_eq!(
+            CounterValue::Unsigned(0) - CounterValue::Unsigned(1),
+            CounterValue::Unsigned(u64::MAX)
+        );
+        assert_eq!(
+            CounterValue::Signed(i64::MIN) - CounterValue::Signed(1),
+            CounterValue::Signed(i64::MAX)
+        );
+        assert_eq!(
+            CounterValue::Unsigned(10) - CounterValue::Signed(3),
+            CounterValue::Signed(7)
+        );
+        assert_eq!(
+            CounterValue::Float(5.5) - CounterValue::Unsigned(2),
+            CounterValue::Float(3.5)
+        );
     }
 
     #[test]
-    fn add_float_unsigned_promotes_to_float() {
-        let a = CounterValue::Float(1.5);
-        let b = CounterValue::Unsigned(2);
-        match a + b {
-            CounterValue::Float(v) => assert!((v - 3.5).abs() < f64::EPSILON),
-            _ => panic!("Expected Float variant"),
-        }
-    }
-
-    #[test]
-    fn add_unsigned_float_promotes_to_float() {
-        let a = CounterValue::Unsigned(3);
-        let b = CounterValue::Float(0.5);
-        match a + b {
-            CounterValue::Float(v) => assert!((v - 3.5).abs() < f64::EPSILON),
-            _ => panic!("Expected Float variant"),
-        }
-    }
-
-    #[test]
-    fn add_float_signed_promotes_to_float() {
-        let a = CounterValue::Float(5.0);
-        let b = CounterValue::Signed(-2);
-        match a + b {
-            CounterValue::Float(v) => assert!((v - 3.0).abs() < f64::EPSILON),
-            _ => panic!("Expected Float variant"),
-        }
-    }
-
-    #[test]
-    fn add_signed_float_promotes_to_float() {
-        let a = CounterValue::Signed(-2);
-        let b = CounterValue::Float(5.0);
-        match a + b {
-            CounterValue::Float(v) => assert!((v - 3.0).abs() < f64::EPSILON),
-            _ => panic!("Expected Float variant"),
-        }
-    }
-
-    #[test]
-    fn add_unsigned_wrapping_overflow() {
-        let a = CounterValue::Unsigned(u64::MAX);
-        let b = CounterValue::Unsigned(1);
-        assert!(matches!(a + b, CounterValue::Unsigned(0)));
-    }
-
-    // ==================== Sub Tests ====================
-
-    #[test]
-    fn sub_unsigned_unsigned() {
-        let a = CounterValue::Unsigned(30);
-        let b = CounterValue::Unsigned(10);
-        assert!(matches!(a - b, CounterValue::Unsigned(20)));
-    }
-
-    #[test]
-    fn sub_signed_signed() {
-        let a = CounterValue::Signed(10);
-        let b = CounterValue::Signed(20);
-        assert!(matches!(a - b, CounterValue::Signed(-10)));
-    }
-
-    #[test]
-    fn sub_float_float() {
-        let a = CounterValue::Float(5.5);
-        let b = CounterValue::Float(2.5);
-        match a - b {
-            CounterValue::Float(v) => assert!((v - 3.0).abs() < f64::EPSILON),
-            _ => panic!("Expected Float variant"),
-        }
-    }
-
-    #[test]
-    fn sub_unsigned_signed_promotes_to_signed() {
-        let a = CounterValue::Unsigned(10);
-        let b = CounterValue::Signed(3);
-        assert!(matches!(a - b, CounterValue::Signed(7)));
-    }
-
-    #[test]
-    fn sub_signed_unsigned_promotes_to_signed() {
-        let a = CounterValue::Signed(5);
-        let b = CounterValue::Unsigned(15);
-        assert!(matches!(a - b, CounterValue::Signed(-10)));
-    }
-
-    #[test]
-    fn sub_float_unsigned_promotes_to_float() {
-        let a = CounterValue::Float(5.5);
-        let b = CounterValue::Unsigned(2);
-        match a - b {
-            CounterValue::Float(v) => assert!((v - 3.5).abs() < f64::EPSILON),
-            _ => panic!("Expected Float variant"),
-        }
-    }
-
-    #[test]
-    fn sub_unsigned_float_promotes_to_float() {
-        let a = CounterValue::Unsigned(5);
-        let b = CounterValue::Float(2.5);
-        match a - b {
-            CounterValue::Float(v) => assert!((v - 2.5).abs() < f64::EPSILON),
-            _ => panic!("Expected Float variant"),
-        }
-    }
-
-    #[test]
-    fn sub_float_signed_promotes_to_float() {
-        let a = CounterValue::Float(5.0);
-        let b = CounterValue::Signed(2);
-        match a - b {
-            CounterValue::Float(v) => assert!((v - 3.0).abs() < f64::EPSILON),
-            _ => panic!("Expected Float variant"),
-        }
-    }
-
-    #[test]
-    fn sub_signed_float_promotes_to_float() {
-        let a = CounterValue::Signed(5);
-        let b = CounterValue::Float(2.5);
-        match a - b {
-            CounterValue::Float(v) => assert!((v - 2.5).abs() < f64::EPSILON),
-            _ => panic!("Expected Float variant"),
-        }
-    }
-
-    #[test]
-    fn sub_unsigned_wrapping_underflow() {
-        let a = CounterValue::Unsigned(0);
-        let b = CounterValue::Unsigned(1);
-        assert!(matches!(a - b, CounterValue::Unsigned(u64::MAX)));
-    }
-
-    // ==================== AddAssign Tests ====================
-
-    #[test]
-    fn add_assign_unsigned_unsigned() {
+    fn assign_ops_work() {
         let mut a = CounterValue::Unsigned(10);
         a += CounterValue::Unsigned(20);
-        assert!(matches!(a, CounterValue::Unsigned(30)));
-    }
-
-    #[test]
-    fn add_assign_signed_signed() {
-        let mut a = CounterValue::Signed(-10);
-        a += CounterValue::Signed(20);
-        assert!(matches!(a, CounterValue::Signed(10)));
-    }
-
-    #[test]
-    fn add_assign_float_float() {
-        let mut a = CounterValue::Float(1.5);
-        a += CounterValue::Float(2.5);
-        match a {
-            CounterValue::Float(v) => assert!((v - 4.0).abs() < f64::EPSILON),
-            _ => panic!("Expected Float variant"),
-        }
-    }
-
-    #[test]
-    fn add_assign_unsigned_signed_promotes_to_signed() {
-        let mut a = CounterValue::Unsigned(10);
-        a += CounterValue::Signed(-3);
-        assert!(matches!(a, CounterValue::Signed(7)));
-    }
-
-    #[test]
-    fn add_assign_float_unsigned_stays_float() {
-        let mut a = CounterValue::Float(1.5);
-        a += CounterValue::Unsigned(2);
-        match a {
-            CounterValue::Float(v) => assert!((v - 3.5).abs() < f64::EPSILON),
-            _ => panic!("Expected Float variant"),
-        }
-    }
-
-    // ==================== SubAssign Tests ====================
-
-    #[test]
-    fn sub_assign_unsigned_unsigned() {
-        let mut a = CounterValue::Unsigned(30);
-        a -= CounterValue::Unsigned(10);
-        assert!(matches!(a, CounterValue::Unsigned(20)));
-    }
-
-    #[test]
-    fn sub_assign_signed_signed() {
-        let mut a = CounterValue::Signed(10);
-        a -= CounterValue::Signed(20);
-        assert!(matches!(a, CounterValue::Signed(-10)));
-    }
-
-    #[test]
-    fn sub_assign_float_float() {
-        let mut a = CounterValue::Float(5.5);
-        a -= CounterValue::Float(2.5);
-        match a {
-            CounterValue::Float(v) => assert!((v - 3.0).abs() < f64::EPSILON),
-            _ => panic!("Expected Float variant"),
-        }
-    }
-
-    #[test]
-    fn sub_assign_unsigned_signed_promotes_to_signed() {
-        let mut a = CounterValue::Unsigned(10);
-        a -= CounterValue::Signed(3);
-        assert!(matches!(a, CounterValue::Signed(7)));
-    }
-
-    #[test]
-    fn sub_assign_float_unsigned_stays_float() {
-        let mut a = CounterValue::Float(10.5);
-        a -= CounterValue::Unsigned(3);
-        match a {
-            CounterValue::Float(v) => assert!((v - 7.5).abs() < f64::EPSILON),
-            _ => panic!("Expected Float variant"),
-        }
-    }
-
-    // ==================== Edge Cases ====================
-
-    #[test]
-    fn add_zero_unsigned() {
-        let a = CounterValue::Unsigned(42);
-        let b = CounterValue::Unsigned(0);
-        assert!(matches!(a + b, CounterValue::Unsigned(42)));
-    }
-
-    #[test]
-    fn sub_zero_unsigned() {
-        let a = CounterValue::Unsigned(42);
-        let b = CounterValue::Unsigned(0);
-        assert!(matches!(a - b, CounterValue::Unsigned(42)));
-    }
-
-    #[test]
-    fn add_negative_signed() {
-        let a = CounterValue::Signed(-10);
-        let b = CounterValue::Signed(-20);
-        assert!(matches!(a + b, CounterValue::Signed(-30)));
-    }
-
-    #[test]
-    fn sub_negative_signed() {
-        let a = CounterValue::Signed(-10);
-        let b = CounterValue::Signed(-20);
-        assert!(matches!(a - b, CounterValue::Signed(10)));
-    }
-
-    #[test]
-    fn add_assign_multiple_operations() {
-        let mut a = CounterValue::Unsigned(0);
-        a += CounterValue::Unsigned(10);
-        a += CounterValue::Unsigned(20);
-        a += CounterValue::Unsigned(30);
-        assert!(matches!(a, CounterValue::Unsigned(60)));
-    }
-
-    #[test]
-    fn sub_assign_multiple_operations() {
-        let mut a = CounterValue::Signed(100);
-        a -= CounterValue::Signed(30);
-        a -= CounterValue::Signed(20);
-        a -= CounterValue::Signed(10);
-        assert!(matches!(a, CounterValue::Signed(40)));
-    }
-
-    #[test]
-    fn mixed_add_sub_assign_operations() {
-        let mut a = CounterValue::Signed(50);
-        a += CounterValue::Signed(25);
-        a -= CounterValue::Signed(15);
-        a += CounterValue::Signed(-10);
-        assert!(matches!(a, CounterValue::Signed(50)));
+        a -= CounterValue::Signed(5);
+        assert_eq!(a, CounterValue::Signed(25));
     }
 }

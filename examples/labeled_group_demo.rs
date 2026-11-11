@@ -1,46 +1,43 @@
-//! Demo showcasing the `labeled_group!` macro for HTTP request metrics.
-//!
-//! This example demonstrates how to use labeled counters to track metrics
-//! with different label values (e.g., HTTP requests by method).
+//! Demo showcasing the `labeled_group!` macro for single-label and multi-label HTTP metrics.
 //!
 //! Run with:
 //! ```bash
 //! cargo run --example labeled_group_demo --features full
 //! ```
 
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
-use contatori::labeled_group;
 use contatori::observers::json::JsonObserver;
-use contatori::observers::prometheus::{MetricType, PrometheusObserver};
+use contatori::observers::prometheus::PrometheusObserver;
 use contatori::observers::table::TableObserver;
+use contatori::prelude::*;
 use std::sync::Arc;
 use std::thread;
 
-// Define a labeled group for HTTP requests by method
+// Define a single-label group for HTTP requests by method.
+// Because sub-counters use `Monotone`, observers automatically export this as a Counter!
 labeled_group!(
     HttpRequests,
     "http_requests_total",
     "method",
-    value: Unsigned,              // base metric (mandatory)
-    get: "GET": Unsigned,         // method="GET"
-    post: "POST": Unsigned,       // method="POST"
-    put: "PUT": Unsigned,         // method="PUT"
-    delete: "DELETE": Unsigned,   // method="DELETE"
-    patch: "PATCH": Unsigned,     // method="PATCH"
+    get: "GET": Monotone,
+    post: "POST": Monotone,
+    put: "PUT": Monotone,
+    delete: "DELETE": Monotone,
+    patch: "PATCH": Monotone,
 );
 
-// Define a labeled group for HTTP response status codes
+// Define a multi-label group for HTTP responses by method and status code.
 labeled_group!(
     HttpResponses,
     "http_responses_total",
-    "status",
-    value: Unsigned,                  // base metric (mandatory)
-    ok: "200": Unsigned,              // status="200"
-    created: "201": Unsigned,         // status="201"
-    bad_request: "400": Unsigned,     // status="400"
-    not_found: "404": Unsigned,       // status="404"
-    server_error: "500": Unsigned,    // status="500"
+    ["method", "status"],
+    get_ok: ["GET", "200"]: Monotone,
+    post_created: ["POST", "201"]: Monotone,
+    put_ok: ["PUT", "200"]: Monotone,
+    delete_ok: ["DELETE", "200"]: Monotone,
+    patch_ok: ["PATCH", "200"]: Monotone,
+    post_bad_request: ["POST", "400"]: Monotone,
+    get_not_found: ["GET", "404"]: Monotone,
+    get_server_error: ["GET", "500"]: Monotone,
 );
 
 // Static instances - can be used from anywhere in the application
@@ -48,68 +45,50 @@ static HTTP_REQUESTS: HttpRequests = HttpRequests::new();
 static HTTP_RESPONSES: HttpResponses = HttpResponses::new();
 
 fn simulate_traffic() {
-    // Simulate some HTTP traffic
-
     // GET requests (most common)
     for _ in 0..150 {
-        HTTP_REQUESTS.value.add(1);
-        HTTP_REQUESTS.get.add(1);
-        HTTP_RESPONSES.value.add(1);
-        HTTP_RESPONSES.ok.add(1);
+        HTTP_REQUESTS.get.incr();
+        HTTP_RESPONSES.get_ok.incr();
     }
 
     // POST requests
     for _ in 0..50 {
-        HTTP_REQUESTS.value.add(1);
-        HTTP_REQUESTS.post.add(1);
-        HTTP_RESPONSES.value.add(1);
-        HTTP_RESPONSES.created.add(1);
+        HTTP_REQUESTS.post.incr();
+        HTTP_RESPONSES.post_created.incr();
     }
 
     // PUT requests
     for _ in 0..30 {
-        HTTP_REQUESTS.value.add(1);
-        HTTP_REQUESTS.put.add(1);
-        HTTP_RESPONSES.value.add(1);
-        HTTP_RESPONSES.ok.add(1);
+        HTTP_REQUESTS.put.incr();
+        HTTP_RESPONSES.put_ok.incr();
     }
 
     // DELETE requests
     for _ in 0..10 {
-        HTTP_REQUESTS.value.add(1);
-        HTTP_REQUESTS.delete.add(1);
-        HTTP_RESPONSES.value.add(1);
-        HTTP_RESPONSES.ok.add(1);
+        HTTP_REQUESTS.delete.incr();
+        HTTP_RESPONSES.delete_ok.incr();
     }
 
     // PATCH requests
     for _ in 0..5 {
-        HTTP_REQUESTS.value.add(1);
-        HTTP_REQUESTS.patch.add(1);
-        HTTP_RESPONSES.value.add(1);
-        HTTP_RESPONSES.ok.add(1);
+        HTTP_REQUESTS.patch.incr();
+        HTTP_RESPONSES.patch_ok.incr();
     }
 
     // Some errors
     for _ in 0..15 {
-        HTTP_REQUESTS.value.add(1);
-        HTTP_REQUESTS.get.add(1);
-        HTTP_RESPONSES.value.add(1);
-        HTTP_RESPONSES.not_found.add(1);
+        HTTP_REQUESTS.get.incr();
+        HTTP_RESPONSES.get_not_found.incr();
     }
 
     for _ in 0..5 {
-        HTTP_REQUESTS.value.add(1);
-        HTTP_REQUESTS.post.add(1);
-        HTTP_RESPONSES.value.add(1);
-        HTTP_RESPONSES.bad_request.add(1);
+        HTTP_REQUESTS.post.incr();
+        HTTP_RESPONSES.post_bad_request.incr();
     }
 
     for _ in 0..3 {
-        HTTP_REQUESTS.value.add(1);
-        HTTP_REQUESTS.get.add(1);
-        HTTP_RESPONSES.value.add(1);
-        HTTP_RESPONSES.server_error.add(1);
+        HTTP_REQUESTS.get.incr();
+        HTTP_RESPONSES.get_server_error.incr();
     }
 }
 
@@ -125,45 +104,33 @@ fn simulate_concurrent_traffic(num_threads: usize, iterations: usize) {
 
         let handle = thread::spawn(move || {
             for i in 0..iterations {
-                // Simulate different request patterns per thread
-                let method_choice = (thread_id + i) % 5;
-
-                req.value.add(1);
-
-                match method_choice {
+                match (thread_id + i) % 5 {
                     0 => {
-                        req.get.add(1);
-                        resp.value.add(1);
-                        resp.ok.add(1);
+                        req.get.incr();
+                        resp.get_ok.incr();
                     }
                     1 => {
-                        req.post.add(1);
-                        resp.value.add(1);
-                        resp.created.add(1);
+                        req.post.incr();
+                        resp.post_created.incr();
                     }
                     2 => {
-                        req.put.add(1);
-                        resp.value.add(1);
-                        resp.ok.add(1);
+                        req.put.incr();
+                        resp.put_ok.incr();
                     }
                     3 => {
-                        req.delete.add(1);
-                        resp.value.add(1);
-                        resp.ok.add(1);
+                        req.delete.incr();
+                        resp.delete_ok.incr();
                     }
                     _ => {
-                        req.patch.add(1);
-                        resp.value.add(1);
-                        resp.ok.add(1);
+                        req.patch.incr();
+                        resp.patch_ok.incr();
                     }
                 }
 
-                // Simulate some errors
+                // Simulate some 404s
                 if i % 100 == 0 {
-                    req.value.add(1);
-                    req.get.add(1);
-                    resp.value.add(1);
-                    resp.not_found.add(1);
+                    req.get.incr();
+                    resp.get_not_found.incr();
                 }
             }
         });
@@ -176,11 +143,9 @@ fn simulate_concurrent_traffic(num_threads: usize, iterations: usize) {
     }
 
     println!(
-        "\n=== Concurrent Traffic Results ({} threads × {} iterations) ===\n",
-        num_threads, iterations
+        "\n=== Concurrent Traffic Results ({num_threads} threads × {iterations} iterations) ===\n"
     );
 
-    // Show results
     let counters: Vec<&dyn Observable> = vec![&*requests, &*responses];
 
     println!("--- Table Format ---\n");
@@ -190,23 +155,21 @@ fn simulate_concurrent_traffic(num_threads: usize, iterations: usize) {
     println!("\n--- Prometheus Format ---\n");
     let prometheus = PrometheusObserver::new()
         .with_namespace("myapp")
-        .with_type("http_requests_total", MetricType::Counter)
-        .with_type("http_responses_total", MetricType::Counter)
         .with_help("http_requests_total", "Total HTTP requests by method")
         .with_help(
             "http_responses_total",
-            "Total HTTP responses by status code",
+            "Total HTTP responses by method and status code",
         );
 
     match prometheus.render(counters.iter().copied()) {
-        Ok(output) => println!("{}", output),
-        Err(e) => eprintln!("Error: {}", e),
+        Ok(output) => println!("{output}"),
+        Err(e) => eprintln!("Error: {e}"),
     }
 }
 
 fn main() {
     println!("=== Labeled Group Demo ===\n");
-    println!("This demo shows how to use labeled_group! for HTTP metrics.\n");
+    println!("This demo shows single-label and multi-label groups for HTTP metrics.\n");
 
     // Simulate traffic on static counters
     simulate_traffic();
@@ -222,50 +185,46 @@ fn main() {
     // === JSON Output ===
     println!("\n--- JSON Format ---\n");
     let json = JsonObserver::new().pretty(true);
-    match json.to_json(counters.iter().copied()) {
-        Ok(output) => println!("{}", output),
-        Err(e) => eprintln!("Error: {}", e),
+    match json.render(counters.iter().copied()) {
+        Ok(output) => println!("{output}"),
+        Err(e) => eprintln!("Error: {e}"),
     }
 
     // === Prometheus Output ===
     println!("\n--- Prometheus Format ---\n");
     let prometheus = PrometheusObserver::new()
         .with_namespace("myapp")
-        .with_type("http_requests_total", MetricType::Counter)
-        .with_type("http_responses_total", MetricType::Counter)
         .with_help("http_requests_total", "Total HTTP requests by method")
         .with_help(
             "http_responses_total",
-            "Total HTTP responses by status code",
+            "Total HTTP responses by method and status code",
         );
 
     match prometheus.render(counters.iter().copied()) {
-        Ok(output) => println!("{}", output),
-        Err(e) => eprintln!("Error: {}", e),
+        Ok(output) => println!("{output}"),
+        Err(e) => eprintln!("Error: {e}"),
     }
 
-    // === Direct Access Demo ===
-    println!("\n--- Direct Field Access ---\n");
-    println!("HTTP_REQUESTS.value  = {}", HTTP_REQUESTS.value.value());
-    println!("HTTP_REQUESTS.get    = {}", HTTP_REQUESTS.get.value());
-    println!("HTTP_REQUESTS.post   = {}", HTTP_REQUESTS.post.value());
-    println!("HTTP_REQUESTS.put    = {}", HTTP_REQUESTS.put.value());
-    println!("HTTP_REQUESTS.delete = {}", HTTP_REQUESTS.delete.value());
-    println!("HTTP_REQUESTS.patch  = {}", HTTP_REQUESTS.patch.value());
+    // === Direct Access & Dynamic Total Demo ===
+    println!("\n--- Direct Field Access & Dynamic Total ---\n");
+    println!("HTTP_REQUESTS.total() = {}", HTTP_REQUESTS.total());
+    println!("HTTP_REQUESTS.get     = {}", HTTP_REQUESTS.get.value());
+    println!("HTTP_REQUESTS.post    = {}", HTTP_REQUESTS.post.value());
+    println!("HTTP_REQUESTS.put     = {}", HTTP_REQUESTS.put.value());
+    println!("HTTP_REQUESTS.delete  = {}", HTTP_REQUESTS.delete.value());
+    println!("HTTP_REQUESTS.patch   = {}", HTTP_REQUESTS.patch.value());
 
     // === expand() Demo ===
     println!("\n--- Using expand() ---\n");
-    for entry in HTTP_REQUESTS.expand() {
-        match entry.label {
-            Some((key, value)) => {
-                println!(
-                    "  {}{{{}=\"{}\"}} = {}",
-                    entry.name, key, value, entry.value
-                );
-            }
-            None => {
-                println!("  {} = {} (base value)", entry.name, entry.value);
-            }
+    for entry in HTTP_RESPONSES.expand() {
+        if let Some(value) = entry.value {
+            let labels = entry
+                .labels
+                .iter()
+                .map(|(k, v)| format!("{k}=\"{v}\""))
+                .collect::<Vec<_>>()
+                .join(",");
+            println!("  {}{{{labels}}} = {value}", entry.name);
         }
     }
 

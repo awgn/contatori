@@ -1,238 +1,278 @@
-//! Labeled group macro for creating sets of related counters with labels.
+//! Labeled group macro for creating compile-time sets of labeled counters.
 //!
-//! This module provides the [`labeled_group!`] macro for creating groups of
-//! counters that share a metric name but have different label values.
-//!
-//! # Example
-//!
-//! ```rust
-//! use contatori::labeled_group;
-//! use contatori::counters::unsigned::Unsigned;
-//! use contatori::counters::Observable;
-//!
-//! labeled_group!(
-//!     HttpRequests,
-//!     "http_requests",
-//!     "method",
-//!     value: Unsigned,
-//!     get: "GET": Unsigned,
-//!     post: "POST": Unsigned,
-//! );
-//!
-//! static HTTP: HttpRequests = HttpRequests::new();
-//!
-//! // Increment counters with direct access
-//! HTTP.value.add(1);
-//! HTTP.get.add(1);
-//!
-//! // Export via expand()
-//! for entry in HTTP.expand() {
-//!     println!("{}: {:?} = {}", entry.name, entry.label, entry.value);
-//! }
-//! ```
+//! [`labeled_group!`](crate::labeled_group) generates a struct whose fields are
+//! independent sharded counters associated with static `(key, value)` label pairs.
+//! Both single-label and multi-label dimensions are supported with zero runtime
+//! lookup or allocation overhead.
 
-/// Creates a labeled group of counters with compile-time known structure.
+/// Creates a struct of sharded counters sharing a metric name with static labels.
 ///
-/// This macro generates a struct containing multiple counters, each associated
-/// with a label value. The generated struct implements the [`Observable`] trait
-/// and its `expand()` method returns all sub-counters with their labels.
+/// Unlike dynamic label maps, all label slices are constructed in `static` memory
+/// at compile time, providing direct field access on the hot path and avoiding
+/// double-counting when aggregating in Prometheus or OpenTelemetry.
 ///
-/// # Syntax
-///
-/// ```rust,ignore
-/// labeled_group!(
-///     StructName,           // Name of the generated struct
-///     "metric_name",        // The metric name for all counters
-///     "label_key",          // The label key (e.g., "method")
-///     value: CounterType,   // MANDATORY unlabeled counter (base metric)
-///
-///     // Optional counters with labels:
-///     field_name: "label_value": CounterType,
-/// );
-/// ```
-///
-/// # Semantics
-///
-/// - **`value` field**: The mandatory unlabeled counter represents the base metric value.
-///   It is semantically independent from labeled counters and should be incremented
-///   based on your application logic.
-/// - **Labeled fields**: Optional breakdowns that provide dimensional views of the metric.
-///   These are independent counters, NOT automatically aggregated.
-///
-/// # Example
+/// # Single-Label Syntax
 ///
 /// ```rust
-/// use contatori::labeled_group;
-/// use contatori::counters::unsigned::Unsigned;
-/// use contatori::counters::Observable;
+/// use contatori::{Monotone, Observable, labeled_group};
 ///
 /// labeled_group!(
 ///     HttpRequests,
-///     "http_requests",
+///     "http_requests_total",
 ///     "method",
-///     value: Unsigned,              // Base metric (mandatory)
-///     get: "GET": Unsigned,
-///     post: "POST": Unsigned,
-///     put: "PUT": Unsigned,
-///     delete: "DELETE": Unsigned,
+///     get: "GET": Monotone,
+///     post: "POST": Monotone,
 /// );
 ///
 /// static HTTP: HttpRequests = HttpRequests::new();
+/// HTTP.get.incr();
+/// HTTP.post.add(2);
 ///
-/// // Direct field access for incrementing
-/// HTTP.value.add(1);  // Increment base metric
-/// HTTP.get.add(1);    // Increment GET counter
-///
-/// // The expand() method returns:
-/// // - http_requests (no label) = value
-/// // - http_requests{method="GET"} = get
-/// // - http_requests{method="POST"} = post
-/// // etc.
+/// assert_eq!(HTTP.total().as_u64(), 3);
+/// assert_eq!(HTTP.expand().len(), 2);
 /// ```
 ///
-/// # Prometheus Output
+/// # Multi-Label Syntax
 ///
-/// When used with the Prometheus observer, the output will be:
+/// ```rust
+/// use contatori::{Monotone, Observable, labeled_group};
 ///
-/// ```text
-/// http_requests 100
-/// http_requests{method="GET"} 50
-/// http_requests{method="POST"} 30
-/// http_requests{method="PUT"} 15
-/// http_requests{method="DELETE"} 5
+/// labeled_group!(
+///     HttpResponses,
+///     "http_responses_total",
+///     ["method", "status"],
+///     get_200: ["GET", "200"]: Monotone,
+///     get_404: ["GET", "404"]: Monotone,
+///     post_201: ["POST", "201"]: Monotone,
+/// );
+///
+/// static RESP: HttpResponses = HttpResponses::new();
+/// RESP.get_200.add(10);
+/// RESP.get_404.incr();
+///
+/// let entries = RESP.expand();
+/// assert_eq!(entries[0].labels, &[("method", "GET"), ("status", "200")]);
+/// assert_eq!(RESP.total().as_u64(), 11);
 /// ```
 #[macro_export]
 macro_rules! labeled_group {
+    // Single-label shorthand -> delegates to the multi-label arm
     (
+        $(#[$meta:meta])*
         $name:ident,
         $metric:literal,
         $label_key:literal,
-        $main_field:ident : $value_ty:ty,
-        $($rest:tt)*
+        $( $field:ident : $label_val:literal : $ty:ty ),+ $(,)?
     ) => {
-        $crate::labeled_group!(@parse
+        $crate::labeled_group!(
+            $(#[$meta])*
             $name,
             $metric,
-            $label_key,
-            $main_field,
-            $value_ty,
-            [],    // labeled fields accumulator
-            $($rest)*
+            [$label_key],
+            $( $field : [$label_val] : $ty ),+
         );
     };
 
-    // Parse labeled field: `field: "label": Type,`
-    (@parse
+    // Multi-label canonical arm
+    (
+        $(#[$meta:meta])*
         $name:ident,
         $metric:literal,
-        $label_key:literal,
-        $main_field:ident,
-        $value_ty:ty,
-        [$($labeled:tt)*],
-        $field:ident : $label_val:literal : $ty:ty,
-        $($rest:tt)*
+        [ $( $label_key:literal ),+ $(,)? ],
+        $( $field:ident : [ $( $label_val:literal ),+ $(,)? ] : $ty:ty ),+ $(,)?
     ) => {
-        $crate::labeled_group!(@parse
-            $name,
-            $metric,
-            $label_key,
-            $main_field,
-            $value_ty,
-            [$($labeled)* ($field, $label_val, $ty)],
-            $($rest)*
-        );
-    };
-
-    // Terminal case - generate the struct
-    (@parse
-        $name:ident,
-        $metric:literal,
-        $label_key:literal,
-        $main_field:ident,
-        $value_ty:ty,
-        [$(($lfield:ident, $lval:literal, $lty:ty))*],
-    ) => {
-        /// A labeled group of counters.
-        ///
-        /// Generated by the `labeled_group!` macro.
+        $(#[$meta])*
         pub struct $name {
-            pub $main_field: $value_ty,
-            $(pub $lfield: $lty,)*
+            $(pub $field: $ty,)+
         }
 
+        #[allow(dead_code)]
         impl $name {
-            /// Creates a new instance with all counters initialized.
+            /// Creates a new group with all sub-counters initialized and named.
+            #[must_use]
             pub const fn new() -> Self {
                 Self {
-                    $main_field: <$value_ty>::new(),
-                    $($lfield: <$lty>::new(),)*
+                    $($field: <$ty>::with_shards().with_name($metric),)+
                 }
             }
 
-            /// Returns the metric name for this group.
+            /// Returns the shared metric name for this group.
+            #[must_use]
             #[inline]
-            #[allow(dead_code)]
             pub const fn metric_name(&self) -> &'static str {
                 $metric
             }
 
-            /// Returns the label key for this group.
+            /// Returns all label keys defined for this group.
+            #[must_use]
             #[inline]
-            #[allow(dead_code)]
+            pub const fn label_keys(&self) -> &'static [&'static str] {
+                &[ $( $label_key ),+ ]
+            }
+
+            /// Returns the first label key defined for this group.
+            #[must_use]
+            #[inline]
             pub const fn label_key(&self) -> &'static str {
-                $label_key
+                self.label_keys()[0]
+            }
+
+            /// Computes the sum of all observed sub-counters in this group.
+            #[must_use]
+            pub fn total(&self) -> $crate::counters::CounterValue {
+                use $crate::counters::{CounterValue, Observable};
+                let mut acc: ::core::option::Option<CounterValue> = ::core::option::Option::None;
+                $(
+                    if let ::core::option::Option::Some(v) = Observable::try_value(&self.$field) {
+                        acc = ::core::option::Option::Some(match acc {
+                            ::core::option::Option::Some(cur) => cur + v,
+                            ::core::option::Option::None => v,
+                        });
+                    }
+                )+
+                acc.unwrap_or(CounterValue::Unsigned(0))
             }
         }
 
         impl $crate::counters::Observable for $name {
+            #[inline]
             fn name(&self) -> &'static str {
                 $metric
             }
 
+            #[inline]
             fn value(&self) -> $crate::counters::CounterValue {
-                self.$main_field.value()
+                self.total()
             }
 
-            fn metric_kind(&self) -> $crate::counters::MetricKind {
-                $crate::counters::MetricKind::Gauge
-            }
-
-            fn expand(&self) -> Vec<$crate::counters::ObservableEntry> {
-                const LABELS:  &[&'static str] = &[ $( $lval ),* ];
-                let mut entries = Vec::with_capacity(1 + LABELS.len());
-
-                // Add the mandatory unlabeled counter using the custom field name
-                entries.push($crate::counters::ObservableEntry {
-                    name: $metric,
-                    label: None,
-                    value: self.$main_field.value(),
-                    metric_kind: self.$main_field.metric_kind(),
-                });
-
-                // Add labeled counters
+            fn try_value(&self) -> ::core::option::Option<$crate::counters::CounterValue> {
+                let mut acc: ::core::option::Option<$crate::counters::CounterValue> =
+                    ::core::option::Option::None;
                 $(
-                    entries.push($crate::counters::ObservableEntry {
-                        name: $metric,
-                        label: Some(($label_key, $lval)),
-                        value: self.$lfield.value(),
-                        metric_kind: self.$lfield.metric_kind(),
-                    });
-                )*
+                    if let ::core::option::Option::Some(v) =
+                        $crate::counters::Observable::try_value(&self.$field)
+                    {
+                        acc = ::core::option::Option::Some(match acc {
+                            ::core::option::Option::Some(cur) => cur + v,
+                            ::core::option::Option::None => v,
+                        });
+                    }
+                )+
+                acc
+            }
 
-                entries
+            #[inline]
+            fn metric_kind(&self) -> $crate::counters::MetricKind {
+                #[allow(unreachable_code)]
+                {
+                    $(
+                        return $crate::counters::Observable::metric_kind(&self.$field);
+                    )+
+                }
+            }
+
+            fn expand_into(&self, out: &mut ::std::vec::Vec<$crate::counters::ObservableEntry>) {
+                const LABEL_KEYS: &[&str] = &[ $( $label_key ),+ ];
+                const FIELD_COUNT: usize = <[()]>::len(&[ $( { let _ = stringify!($field); } ),+ ]);
+                out.reserve(FIELD_COUNT);
+
+                $(
+                    {
+                        const N_VALS: usize = <[&str]>::len(&[ $( $label_val ),+ ]);
+                        static FIELD_LABELS: [(&'static str, &'static str); N_VALS] = {
+                            const VALS: [&str; N_VALS] = [ $( $label_val ),+ ];
+                            assert!(
+                                LABEL_KEYS.len() == N_VALS,
+                                "labeled_group!: number of label values must match number of label keys"
+                            );
+                            let mut arr = [("", ""); N_VALS];
+                            let mut i = 0;
+                            while i < N_VALS {
+                                arr[i] = (LABEL_KEYS[i], VALS[i]);
+                                i += 1;
+                            }
+                            arr
+                        };
+                        out.push($crate::counters::ObservableEntry {
+                            name: $metric,
+                            labels: &FIELD_LABELS,
+                            value: $crate::counters::Observable::try_value(&self.$field),
+                            metric_kind: $crate::counters::Observable::metric_kind(&self.$field),
+                        });
+                    }
+                )+
             }
         }
 
-        impl ::std::fmt::Debug for $name {
-            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        impl $crate::counters::sealed::Resettable for $name {
+            fn try_value_and_reset(&self) -> ::core::option::Option<$crate::counters::CounterValue> {
+                let mut acc: ::core::option::Option<$crate::counters::CounterValue> =
+                    ::core::option::Option::None;
+                $(
+                    if let ::core::option::Option::Some(v) =
+                        $crate::counters::sealed::Resettable::try_value_and_reset(&self.$field)
+                    {
+                        acc = ::core::option::Option::Some(match acc {
+                            ::core::option::Option::Some(cur) => cur + v,
+                            ::core::option::Option::None => v,
+                        });
+                    }
+                )+
+                acc
+            }
+
+            fn value_and_reset(&self) -> $crate::counters::CounterValue {
+                self.try_value_and_reset()
+                    .unwrap_or($crate::counters::CounterValue::Unsigned(0))
+            }
+
+            fn expand_and_reset_into(
+                &self,
+                out: &mut ::std::vec::Vec<$crate::counters::ObservableEntry>,
+            ) {
+                const LABEL_KEYS: &[&str] = &[ $( $label_key ),+ ];
+                const FIELD_COUNT: usize = <[()]>::len(&[ $( { let _ = stringify!($field); } ),+ ]);
+                out.reserve(FIELD_COUNT);
+
+                $(
+                    {
+                        const N_VALS: usize = <[&str]>::len(&[ $( $label_val ),+ ]);
+                        static FIELD_LABELS: [(&'static str, &'static str); N_VALS] = {
+                            const VALS: [&str; N_VALS] = [ $( $label_val ),+ ];
+                            assert!(
+                                LABEL_KEYS.len() == N_VALS,
+                                "labeled_group!: number of label values must match number of label keys"
+                            );
+                            let mut arr = [("", ""); N_VALS];
+                            let mut i = 0;
+                            while i < N_VALS {
+                                arr[i] = (LABEL_KEYS[i], VALS[i]);
+                                i += 1;
+                            }
+                            arr
+                        };
+                        out.push($crate::counters::ObservableEntry {
+                            name: $metric,
+                            labels: &FIELD_LABELS,
+                            value: $crate::counters::sealed::Resettable::try_value_and_reset(
+                                &self.$field,
+                            ),
+                            metric_kind: $crate::counters::Observable::metric_kind(&self.$field),
+                        });
+                    }
+                )+
+            }
+        }
+
+        impl ::core::fmt::Debug for $name {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 f.debug_struct(stringify!($name))
-                    .field(stringify!($main_field), &self.$main_field)
-                    $(.field(stringify!($lfield), &self.$lfield))*
+                    $(.field(stringify!($field), &self.$field))+
                     .finish()
             }
         }
 
-        impl Default for $name {
+        impl ::core::default::Default for $name {
             fn default() -> Self {
                 Self::new()
             }
@@ -242,145 +282,82 @@ macro_rules! labeled_group {
 
 #[cfg(test)]
 mod tests {
+    use crate::adapters::Resettable;
+    use crate::counters::monotone::Monotone;
     use crate::counters::unsigned::Unsigned;
-    use crate::counters::Observable;
+    use crate::counters::{CounterValue, MetricKind, Observable};
 
     labeled_group!(
         TestRequests,
         "test_requests",
         "method",
-        value: Unsigned,
-        get: "GET": Unsigned,
-        post: "POST": Unsigned,
+        get: "GET": Monotone,
+        post: "POST": Monotone,
+    );
+
+    labeled_group!(
+        TestMultiLabel,
+        "http_responses_total",
+        ["method", "status"],
+        get_ok: ["GET", "200"]: Unsigned<16>,
+        post_created: ["POST", "201"]: Unsigned<16>,
     );
 
     #[test]
-    fn test_new() {
+    fn test_single_label_and_metric_kind_delegation() {
         let requests = TestRequests::new();
         assert_eq!(requests.metric_name(), "test_requests");
         assert_eq!(requests.label_key(), "method");
-    }
+        assert_eq!(requests.label_keys(), &["method"]);
+        // Delegates MetricKind::Counter from Monotone!
+        assert_eq!(requests.metric_kind(), MetricKind::Counter);
+        assert_eq!(requests.get.name(), "test_requests");
 
-    #[test]
-    fn test_direct_access() {
-        let requests = TestRequests::new();
-        requests.value.add(10);
-        requests.get.add(5);
-        requests.post.add(3);
-
-        assert_eq!(requests.value.value().as_u64(), 10);
-        assert_eq!(requests.get.value().as_u64(), 5);
-        assert_eq!(requests.post.value().as_u64(), 3);
-    }
-
-    #[test]
-    fn test_expand() {
-        let requests = TestRequests::new();
-        requests.value.add(100);
         requests.get.add(60);
         requests.post.add(40);
+        assert_eq!(requests.total(), CounterValue::Unsigned(100));
+        assert_eq!(requests.value(), CounterValue::Unsigned(100));
 
         let entries = requests.expand();
-        assert_eq!(entries.len(), 3);
-
-        // First entry: value (no label)
-        assert_eq!(entries[0].name, "test_requests");
-        assert!(entries[0].label.is_none());
-        assert_eq!(entries[0].value.as_u64(), 100);
-
-        // Second entry: get with label
-        assert_eq!(entries[1].name, "test_requests");
-        assert!(entries[1].label.is_some());
-        let (key, val) = entries[1].label.unwrap();
-        assert_eq!(key, "method");
-        assert_eq!(val, "GET");
-        assert_eq!(entries[1].value.as_u64(), 60);
-
-        // Third entry: post with label
-        assert_eq!(entries[2].name, "test_requests");
-        assert!(entries[2].label.is_some());
-        let (key, val) = entries[2].label.unwrap();
-        assert_eq!(key, "method");
-        assert_eq!(val, "POST");
-        assert_eq!(entries[2].value.as_u64(), 40);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].labels, &[("method", "GET")]);
+        assert_eq!(entries[0].value, Some(CounterValue::Unsigned(60)));
+        assert_eq!(entries[1].labels, &[("method", "POST")]);
+        assert_eq!(entries[1].value, Some(CounterValue::Unsigned(40)));
     }
 
     #[test]
-    fn test_observable_value() {
-        let requests = TestRequests::new();
-        requests.value.add(100);
-        requests.get.add(60);
-        requests.post.add(40);
+    fn test_multi_label_and_resettable_group() {
+        let group = Resettable::new(TestMultiLabel::new());
+        assert_eq!(group.metric_kind(), MetricKind::Gauge);
+        assert_eq!(group.label_keys(), &["method", "status"]);
 
-        // value() returns the unlabeled 'value' field directly (not sum)
-        assert_eq!(requests.value().as_u64(), 100);
+        group.get_ok.add(10);
+        group.post_created.add(5);
+
+        let entries = group.expand();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].labels,
+            &[("method", "GET"), ("status", "200")]
+        );
+        assert_eq!(entries[0].value, Some(CounterValue::Unsigned(10)));
+        assert_eq!(
+            entries[1].labels,
+            &[("method", "POST"), ("status", "201")]
+        );
+        assert_eq!(entries[1].value, Some(CounterValue::Unsigned(5)));
+
+        // Second expand after reset returns 0 for both Unsigned sub-counters
+        let reset_entries = group.expand();
+        assert_eq!(reset_entries[0].value, Some(CounterValue::Unsigned(0)));
+        assert_eq!(reset_entries[1].value, Some(CounterValue::Unsigned(0)));
     }
 
     #[test]
-    fn test_observable_name() {
-        let requests = TestRequests::new();
-        assert_eq!(requests.name(), "test_requests");
-    }
-
-    #[test]
-    fn test_static_usage() {
-        static REQUESTS: TestRequests = TestRequests::new();
-
-        REQUESTS.value.add(1);
-        REQUESTS.get.add(1);
-
-        assert_eq!(REQUESTS.value.value().as_u64(), 1);
-        assert_eq!(REQUESTS.get.value().as_u64(), 1);
-    }
-
-    #[test]
-    fn test_debug() {
-        let requests = TestRequests::new();
-        requests.get.add(42);
-
-        let debug_str = format!("{:?}", requests);
-        assert!(debug_str.contains("TestRequests"));
-    }
-
-    // Test with value counter independence
-    #[test]
-    fn test_value_independence() {
-        let requests = TestRequests::new();
-
-        // Increment labeled counters
-        requests.get.add(50);
-        requests.post.add(30);
-
-        // value remains independent
-        assert_eq!(requests.value.value().as_u64(), 0);
-
-        // Increment value separately
-        requests.value.add(100);
-        assert_eq!(requests.value.value().as_u64(), 100);
-
-        // value() returns only the 'value' field
-        assert_eq!(requests.value().as_u64(), 100);
-    }
-
-    // Test with only value (no labeled counters)
-    labeled_group!(
-        OnlyValue,
-        "only_value",
-        "unused",
-        value: Unsigned,
-    );
-
-    #[test]
-    fn test_only_value() {
-        let counters = OnlyValue::new();
-        counters.value.add(50);
-
-        let entries = counters.expand();
-        assert_eq!(entries.len(), 1);
-        assert!(entries[0].label.is_none());
-        assert_eq!(entries[0].value.as_u64(), 50);
-
-        // Observable::value() returns the 'value' field
-        assert_eq!(counters.value().as_u64(), 50);
+    fn test_static_initialization() {
+        static STATIC_GROUP: TestRequests = TestRequests::new();
+        STATIC_GROUP.get.incr();
+        assert!(STATIC_GROUP.total().as_u64() >= 1);
     }
 }

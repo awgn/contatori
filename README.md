@@ -2,599 +2,320 @@
 
 High-performance sharded atomic counters for Rust.
 
-A library providing thread-safe, high-performance counters optimized for highly concurrent workloads. This library implements a **sharded counter pattern** that dramatically reduces contention compared to traditional single atomic counters.
+`contatori` provides thread-safe, ultra-fast counters and statistical trackers optimized for highly concurrent workloads. It implements a **sharded counter pattern** that eliminates cache-line contention compared to traditional single atomic counters.
 
 ## The Problem
 
-In multi-threaded applications, a naive approach to counting uses a single atomic variable shared across all threads. While this is correct, it creates a severe performance bottleneck: every increment operation causes **cache line bouncing** between CPU cores, as each core must acquire exclusive access to the cache line containing the counter.
-
-This contention grows worse with more threads and higher update frequencies, turning what should be a simple operation into a major scalability bottleneck.
+In multi-threaded applications, updating a single shared atomic variable from many cores causes severe **cache-line bouncing**: every `fetch_add` forces exclusive ownership of that cache line across CPU cores, turning a simple increment into a scalability bottleneck.
 
 ## The Solution: Sharded Counters
 
-This library solves the contention problem by **sharding** counters across multiple slots (64 by default). Each thread is assigned to a specific slot, so threads updating the counter typically operate on different memory locations, eliminating contention.
+`contatori` distributes each counter across multiple cache-line-padded shards (`64` by default, configurable via const generics `SHARDS`):
 
-### Design Principles
-
-1. **Per-Thread Sharding**: Each thread gets assigned a slot index via `thread_local!`, ensuring that concurrent updates from different threads don't compete for the same cache line.
-
-2. **Cache Line Padding**: Each slot is wrapped in `CachePadded`, which adds padding to ensure each atomic value occupies its own cache line (typically 64 bytes). This prevents **false sharing** where unrelated data on the same cache line causes unnecessary invalidations.
-
-3. **Relaxed Ordering**: All atomic operations use `Ordering::Relaxed` since counters don't need to establish happens-before relationships with other memory operations. This allows maximum optimization by the CPU.
-
-4. **Aggregation on Read**: The global counter value is computed by summing all slots. This makes reads slightly more expensive but keeps writes extremely fast, which is the right trade-off for counters (many writes, few reads).
+1. **Per-Thread Sharding**: Each thread caches a monotonically assigned ID in a `const`-initialized `thread_local!` `Cell` and indexes its shard via `id & (SHARDS - 1)`.
+2. **Cache-Line Padding**: Every shard is wrapped in [`crossbeam_utils::CachePadded`] (128-byte aligned on `x86_64` and `aarch64`) to prevent **false sharing**.
+3. **Relaxed Atomic Ordering**: Hot-path updates use `Ordering::Relaxed` (single atomic instruction, zero locks, zero syscalls).
+4. **Aggregation on Read**: Global values are computed only when observed, trading slightly more work on cold reads for massive throughput on hot writes.
 
 ## Performance Benchmark
 
-### Single Counter: Sharded vs AtomicUsize
+### Single Counter: Sharded vs `AtomicU64`
 
-Benchmarked on **Apple M2** (8 cores) with **8 threads**, each performing **1,000,000 increments** (8 million total operations):
+Benchmarked with 8 persistent worker threads (`8 threads × 100,000 increments` per batch):
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                    Counter Performance Comparison                           │
-│                   (8 threads × 1,000,000 iterations)                        │
+│                   (8 threads × 100,000 increments)                          │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  AtomicUsize (single)   ████████████████████████████████████████  162.53 ms │
+│  AtomicU64 (single)     ████████████████████████████████████████  30.74 ms  │
+│                         (26.03 Melem/s)                                     │
 │                                                                             │
-│  Unsigned (sharded)     █                                           2.27 ms │
+│  Unsigned (sharded)     ▏                                         0.224 ms  │
+│                         (3.58 Gelem/s)                                      │
 │                                                                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  Speedup: 71.6x faster                                                      │
+│  Speedup: ~137x faster                                                      │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The sharded counter is **~72x faster** than a naive atomic counter under high contention. This difference grows with more threads and higher contention.
+### Contatori vs OpenTelemetry Counters
 
-### Contatori vs OpenTelemetry Counters/Gauges
+Benchmarked with 8 persistent worker threads (`8 threads × 100,000 increments` per batch):
 
-Benchmarked on **Apple M2** (8 cores) with **8 threads**, each performing **100,000 increments**:
-
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │              Counter Performance: Contatori vs OpenTelemetry                │
-│                        (8 threads × 100,000 iterations)                     │
+│                        (8 threads × 100,000 increments)                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
 │  Simple counter (no labels):                                                │
-│                                                                             │
-│  OpenTelemetry Counter  ████████████████████████████████████████   25.81 ms │
-│                                                                             │
-│  contatori Monotone     █                                          0.33 ms  │
-│                                                                             │
-│  Speedup: 79x faster                                                        │
-│                                                                             │
+│  OpenTelemetry Counter  ████████████████████████████████████████   30.33 ms │
+│  contatori Monotone     ▏                                         0.227 ms  │
+│  Speedup: ~134x faster  (3.53 Gelem/s vs 26.38 Melem/s)                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
 │  Labeled counters (rotating GET/POST/PUT/DELETE):                           │
-│                                                                             │
-│  OpenTelemetry Counter  ████████████████████████████████████████  356.46 ms │
-│                                                                             │
-│  cont. labeled_group!   ▏                                          0.21 ms  │
-│                                                                             │
-│  Speedup: 1665x faster                                                      │
-│                                                                             │
+│  OpenTelemetry Counter  ████████████████████████████████████████  280.64 ms │
+│  cont. labeled_group!   ▏                                         0.166 ms  │
+│  Speedup: ~1,691x faster (4.82 Gelem/s vs 2.85 Melem/s)                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
 │  High contention (all threads same label):                                  │
-│                                                                             │
-│  OpenTelemetry Counter  ████████████████████████████████████████  350.45 ms │
-│                                                                             │
-│  cont. labeled_group!   ▏                                          0.32 ms  │
-│                                                                             │
-│  Speedup: 1093x faster                                                      │
-│                                                                             │
+│  OpenTelemetry Counter  ████████████████████████████████████████  281.48 ms │
+│  cont. labeled_group!   ▏                                         0.226 ms  │
+│  Speedup: ~1,245x faster (3.54 Gelem/s vs 2.84 Melem/s)                     │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
-
-Contatori is **79x to ~1600x faster** than OpenTelemetry counters depending on usage pattern. This massive difference comes from:
-- **Zero runtime overhead**: Labels are resolved at compile time
-- **Sharded storage**: Each sub-counter uses the same sharding strategy
-- **No dynamic dispatch**: Direct field access instead of hash lookups
 
 ## Available Counter Types
 
-| Type | Description | Use Case | `MetricKind` |
-|------|-------------|----------|--------------|
-| `Monotone` | Monotonically increasing counter (never resets) | Prometheus counters, total requests | `Counter` |
-| `Unsigned` | Unsigned integer counter | Event counts, request totals | `Gauge` |
-| `Signed` | Signed integer counter | Gauges, balance tracking | `Gauge` |
-| `Minimum` | Tracks minimum observed value | Latency minimums | `Gauge` |
-| `Maximum` | Tracks maximum observed value | Latency maximums, peak values | `Gauge` |
-| `Average` | Computes running average | Average latency, mean values | `Gauge` |
-| `Rate` | Calculates rate of change (units/second) | Request rates, throughput | `Gauge` |
+| Type | Description | `Observable::value()` | `MetricKind` |
+|------|-------------|-----------------------|--------------|
+| [`Monotone`] | Monotonically increasing `u64` counter (never resets) | `CounterValue::Unsigned` | `Counter` |
+| [`Unsigned`] | Unsigned `u64` counter (supports `add`/`sub` & reset) | `CounterValue::Unsigned` | `Gauge` |
+| [`Signed`] | Signed `i64` counter (gauges, balances, queue depth) | `CounterValue::Signed` | `Gauge` |
+| [`Minimum`] | Tracks minimum observed `u64` (`None` until first observation) | `CounterValue::Unsigned` | `Gauge` |
+| [`Maximum`] | Tracks maximum observed `u64` (`None` until first observation) | `CounterValue::Unsigned` | `Gauge` |
+| [`Average`] | Tracks running floating-point mean (`None` until first observation) | `CounterValue::Float` | `Gauge` |
+| [`Rate`] | Smooth rate of change (units/sec) via continuous-time EWMA | `CounterValue::Float` | `Gauge` |
 
 ## Quick Start
 
-Add to your `Cargo.toml`:
-
 ```toml
 [dependencies]
-contatori = "0.7"
+contatori = "0.8"
 ```
 
 ### Basic Usage
 
 ```rust
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
+use contatori::{Monotone, Observable, Unsigned};
 
-// Create a counter (can be shared across threads via Arc)
-let counter = Unsigned::new().with_name("requests");
+static TOTAL_REQUESTS: Monotone = Monotone::new().with_name("http_requests_total");
 
-// Increment from any thread - extremely fast!
-counter.add(1);
-counter.add(5);
+TOTAL_REQUESTS.incr();
+TOTAL_REQUESTS.add(5);
 
-// Read the total value (aggregates all shards)
-println!("Total requests: {}", counter.value());
-// value() does NOT reset the counter - it just reads
-println!("Still: {}", counter.value()); // Still 6
+assert_eq!(TOTAL_REQUESTS.value().as_u64(), 6);
+
+// Adjustable gauge-style counter
+let inflight = Unsigned::new().with_name("inflight_requests");
+inflight.add(10);
+inflight.sub(3);
+assert_eq!(inflight.value().as_u64(), 7);
 ```
 
-### Resettable Counters
+### Customizing Shard Count (Memory vs Contention)
 
-To reset a counter when reading (useful for per-period metrics), wrap it with `Resettable`:
+By default each counter uses `64` shards (~8 KB on 64-bit platforms with 128-byte `CachePadded` slots). You can tune the shard count to any power of two via const generics:
 
 ```rust
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
-use contatori::adapters::Resettable;
+use contatori::{Observable, Unsigned};
 
-// Create a resettable counter for per-period metrics
-let requests_per_second = Resettable::new(Unsigned::new().with_name("requests_per_second"));
+// Compact 16-shard counter (~2 KB)
+static COMPACT: Unsigned<16> = Unsigned::with_shards().with_name("compact_requests");
 
-requests_per_second.add(100);
+// High-core-count 128-shard counter (~16 KB)
+let wide = Unsigned::<128>::with_shards();
 
-// value() returns the value AND resets the counter
-let count = requests_per_second.value();
-println!("Requests this period: {}", count); // 100
-println!("After reset: {}", requests_per_second.value()); // 0
+COMPACT.incr();
+wide.add(41);
+assert_eq!(COMPACT.value().as_u64() + wide.value().as_u64(), 42);
 ```
 
-### Multi-threaded Usage
+### Statistical Trackers (`Minimum`, `Maximum`, `Average`)
+
+Statistical trackers distinguish "no observations yet" (`None` via `.get()` / `.try_value()`, omitted automatically by observers) from an observed `0`:
 
 ```rust
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
-use std::sync::Arc;
-use std::thread;
+use contatori::{Average, Maximum, Minimum, Observable};
 
-let counter = Arc::new(Unsigned::new());
-let mut handles = vec![];
+let min_latency = Minimum::new().with_name("latency_min_us");
+let max_latency = Maximum::new().with_name("latency_max_us");
+let avg_latency = Average::new().with_name("latency_avg_us");
 
-for _ in 0..8 {
-    let c = Arc::clone(&counter);
-    handles.push(thread::spawn(move || {
-        for _ in 0..1_000_000 {
-            c.add(1);
-        }
-    }));
-}
+assert_eq!(min_latency.get(), None);
+assert_eq!(min_latency.try_value(), None);
 
-for h in handles {
-    h.join().unwrap();
-}
-
-assert_eq!(counter.value(), contatori::counters::CounterValue::Unsigned(8_000_000));
-```
-
-### Tracking Statistics
-
-```rust
-use contatori::counters::minimum::Minimum;
-use contatori::counters::maximum::Maximum;
-use contatori::counters::average::Average;
-use contatori::counters::Observable;
-
-let min_latency = Minimum::new().with_name("latency_min");
-let max_latency = Maximum::new().with_name("latency_max");
-let avg_latency = Average::new().with_name("latency_avg");
-
-// Record some latencies
 for latency in [150, 85, 200, 120, 95] {
     min_latency.observe(latency);
     max_latency.observe(latency);
     avg_latency.observe(latency);
 }
 
-println!("Min: {}", min_latency.value());  // 85
-println!("Max: {}", max_latency.value());  // 200
-println!("Avg: {}", avg_latency.value());  // 130
+assert_eq!(min_latency.get(), Some(85));
+assert_eq!(max_latency.get(), Some(200));
+assert_eq!(avg_latency.average_f64(), Some(130.0));
 ```
 
-## Thread Safety
+### Labeled Counter Groups (`labeled_group!`)
 
-All counter types are `Send + Sync` and can be safely shared across threads using `Arc<Counter>`. In addition, counters constructors are const functions, enabling global initialization. The sharding ensures that concurrent updates are efficient.
+`labeled_group!` generates a struct of compile-time labeled counters with direct field access and zero runtime hashing. Both single-label and multi-label dimensions are supported:
 
-## Memory Usage
+```rust
+use contatori::{Monotone, Observable, labeled_group};
 
-Each counter uses approximately **8KB of memory** (128 slots × 64 bytes per cache line). This is a trade-off: more memory for dramatically better performance under contention.
+// Single label key
+labeled_group!(
+    HttpByMethod,
+    "http_requests_total",
+    "method",
+    get: "GET": Monotone,
+    post: "POST": Monotone,
+);
+
+// Multiple label keys
+labeled_group!(
+    HttpByMethodStatus,
+    "http_responses_total",
+    ["method", "status"],
+    get_200: ["GET", "200"]: Monotone,
+    get_404: ["GET", "404"]: Monotone,
+    post_201: ["POST", "201"]: Monotone,
+);
+
+static REQ: HttpByMethod = HttpByMethod::new();
+static RESP: HttpByMethodStatus = HttpByMethodStatus::new();
+
+REQ.get.add(10);
+REQ.post.add(5);
+assert_eq!(REQ.total().as_u64(), 15);
+
+RESP.get_200.add(9);
+RESP.get_404.incr();
+assert_eq!(RESP.expand()[0].labels, &[("method", "GET"), ("status", "200")]);
+```
+
+### Resettable Counters & Groups
+
+Wrap any counter or `labeled_group!` in [`Resettable`] to atomically read-and-reset shards on each observation period:
+
+```rust
+use contatori::{Observable, Resettable, Unsigned, labeled_group};
+
+let per_period = Resettable::new(Unsigned::new().with_name("requests_per_period"));
+per_period.add(100);
+
+assert_eq!(per_period.value().as_u64(), 100);
+assert_eq!(per_period.value().as_u64(), 0); // Reset after read!
+
+labeled_group!(
+    WindowErrors,
+    "window_errors",
+    "kind",
+    timeout: "timeout": Unsigned,
+    refused: "refused": Unsigned,
+);
+
+let errors = Resettable::new(WindowErrors::new());
+errors.timeout.add(3);
+assert_eq!(errors.value().as_u64(), 3);
+assert_eq!(errors.value().as_u64(), 0);
+```
+
+### Rate Counter (Multi-Observer EWMA)
+
+[`Rate`] computes units/second using a continuous-time Exponentially Weighted Moving Average (default 5s window, configurable via `with_window`). Reads are idempotent across concurrent observers:
+
+```rust
+use contatori::{Observable, Rate};
+use std::time::Duration;
+
+static RPS: Rate = Rate::new()
+    .with_name("requests_per_sec")
+    .with_window(Duration::from_secs(5));
+
+let _ = RPS.rate(); // Establish baseline
+RPS.add(500);
+assert_eq!(RPS.total_value(), 500);
+```
 
 ## Serialization & Observers
 
-The library provides modules for serializing and exporting counter values in various formats. Each module is gated behind a feature flag:
+Each exporter is gated behind an optional Cargo feature:
 
 | Feature | Module | Description |
 |---------|--------|-------------|
-| `serde` | `snapshot` | Serializable snapshot types (use with any serde format) |
-| `table` | `observers::table` | Renders counters as ASCII tables |
-| `json` | `observers::json` | Serializes counters to JSON (includes `serde`) |
-| `opentelemetry` | `observers::opentelemetry` | Exports counters to OpenTelemetry metrics |
-| `prometheus` | `observers::prometheus` | Exports in Prometheus exposition format |
-| `full` | All modules | Enables all observer modules |
+| `serde` | `snapshot` | Serializable `CounterSnapshot` and `MetricsSnapshot` types |
+| `table` | `observers::table` | Pretty ASCII / Unicode tables (`TableObserver`) |
+| `json` | `observers::json` | JSON serialization (`JsonObserver`, implies `serde`) |
+| `prometheus` | `observers::prometheus` | Native `prometheus::core::Collector` & exposition renderer |
+| `opentelemetry` | `observers::opentelemetry` | OpenTelemetry observable instrument callbacks |
+| `full` | All modules | Enables `table`, `json`, `prometheus`, and `opentelemetry` |
 
-### Snapshot Module
+### Prometheus (`PrometheusObserver` & `Collector`)
 
-The `snapshot` module provides serializable types that work with any serde-compatible format (JSON, YAML, TOML, bincode, etc.).
+Register `'static` counters once into a `prometheus::Registry` (recommended for `/metrics` endpoints), or render ad-hoc counters on the fly:
 
-```toml
-[dependencies]
-contatori = { version = "0.7", features = ["serde"] }
+```rust ignore
+use contatori::{Monotone, Observable, Signed};
+use contatori::observers::prometheus::PrometheusObserver;
+
+static REQUESTS: Monotone = Monotone::new().with_name("http_requests_total");
+static CONNECTIONS: Signed = Signed::new().with_name("active_connections");
+
+let observer = PrometheusObserver::new()
+    .with_namespace("myapp")
+    .with_help("http_requests_total", "Total HTTP requests");
+
+// Register once via prometheus::core::Collector:
+observer.register(&[&REQUESTS, &CONNECTIONS])?;
+
+REQUESTS.add(1000);
+CONNECTIONS.add(42);
+
+let exposition = observer.render_registered()?;
 ```
 
-```rust
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
-use contatori::snapshot::{CounterSnapshot, MetricsSnapshot};
+### JSON (`JsonObserver`)
 
-let requests = Unsigned::new().with_name("requests");
-let errors = Unsigned::new().with_name("errors");
-
-requests.add(1000);
-errors.add(5);
-
-let counters: Vec<&dyn Observable> = vec![&requests, &errors];
-
-// Collect snapshots
-let snapshot = MetricsSnapshot::collect(counters.into_iter());
-
-// Serialize with any serde-compatible format
-let json = serde_json::to_string(&snapshot).unwrap();
-let yaml = serde_yaml::to_string(&snapshot).unwrap();
-let bytes = bincode::serialize(&snapshot).unwrap();
-```
-
-### TableObserver
-
-Renders counters as formatted ASCII tables using the `tabled` crate.
-
-```toml
-[dependencies]
-contatori = { version = "0.7", features = ["table"] }
-```
-
-```rust
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
-use contatori::observers::table::{TableObserver, TableStyle};
-
-let requests = Unsigned::new().with_name("requests");
-let errors = Unsigned::new().with_name("errors");
-
-requests.add(1000);
-errors.add(5);
-
-let counters: Vec<&dyn Observable> = vec![&requests, &errors];
-
-// Standard format (vertical list)
-let observer = TableObserver::new().with_style(TableStyle::Rounded);
-println!("{}", observer.render(counters.into_iter()));
-// ╭──────────┬───────╮
-// │ Name     │ Value │
-// ├──────────┼───────┤
-// │ requests │ 1000  │
-// │ errors   │ 5     │
-// ╰──────────┴───────╯
-
-// Compact format (multiple columns)
-let observer = TableObserver::new()
-    .compact(true)
-    .columns(3);
-println!("{}", observer.render(counters.into_iter()));
-// ╭────────────────┬───────────┬──────────────╮
-// │ requests: 1000 │ errors: 5 │ latency: 120 │
-// ╰────────────────┴───────────┴──────────────╯
-```
-
-**Available styles:** `Ascii`, `Rounded`, `Sharp`, `Modern`, `Extended`, `Markdown`, `ReStructuredText`, `Dots`, `Blank`, `Double`
-
-**Compact separators:** `Colon` (`:`), `Equals` (`=`), `Arrow` (`→`), `Pipe` (`|`), `Space`
-
-### JsonObserver
-
-Serializes counters to JSON format using serde.
-
-```toml
-[dependencies]
-contatori = { version = "0.7", features = ["json"] }
-```
-
-```rust
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
+```rust ignore
+use contatori::{Observable, Unsigned};
 use contatori::observers::json::JsonObserver;
 
 let requests = Unsigned::new().with_name("http_requests");
-let errors = Unsigned::new().with_name("http_errors");
-
 requests.add(1000);
-errors.add(5);
 
-let counters: Vec<&dyn Observable> = vec![&requests, &errors];
-
-// Simple array output
-let json = JsonObserver::new()
-    .to_json(counters.into_iter())
-    .unwrap();
-
-// Pretty-printed output with timestamp wrapper
+let counters: Vec<&dyn Observable> = vec![&requests];
 let json = JsonObserver::new()
     .pretty(true)
     .wrap_in_snapshot(true)
     .include_timestamp(true)
-    .to_json(counters.into_iter())
-    .unwrap();
-```
-### PrometheusObserver
-
-Exports counters in Prometheus exposition format using the official `prometheus` crate.
-
-```toml
-[dependencies]
-contatori = { version = "0.7", features = ["prometheus"] }
+    .render(counters.into_iter())?;
 ```
 
-#### Automatic Metric Type Detection
+### Table (`TableObserver`)
 
-The observer automatically determines the correct Prometheus metric type based on the counter's `metric_kind()` method:
+```rust ignore
+use contatori::{Observable, Unsigned};
+use contatori::observers::table::{TableObserver, TableStyle};
 
-| Counter Type | `MetricKind` | Prometheus Type |
-|--------------|--------------|-----------------|
-| `Monotone` | `Counter` | Counter |
-| `Unsigned` | `Gauge` | Gauge |
-| `Signed` | `Gauge` | Gauge |
-| `Minimum` | `Gauge` | Gauge |
-| `Maximum` | `Gauge` | Gauge |
-| `Average` | `Gauge` | Gauge |
-
-This means you don't need to manually specify types for most use cases:
-
-```rust
-use contatori::counters::monotone::Monotone;
-use contatori::counters::signed::Signed;
-use contatori::counters::{Observable, MetricKind};
-use contatori::observers::prometheus::PrometheusObserver;
-
-// Monotone returns MetricKind::Counter, auto-detected as Prometheus Counter
-let requests = Monotone::new().with_name("http_requests_total");
-assert_eq!(requests.metric_kind(), MetricKind::Counter);
+let requests = Unsigned::new().with_name("requests");
 requests.add(1000);
 
-// Signed returns MetricKind::Gauge, auto-detected as Prometheus Gauge
-let connections = Signed::new().with_name("active_connections");
-assert_eq!(connections.metric_kind(), MetricKind::Gauge);
-connections.add(42);
-
-let counters: Vec<&dyn Observable> = vec![&requests, &connections];
-
-let observer = PrometheusObserver::new()
-    .with_namespace("myapp")
-    .with_help("http_requests_total", "Total number of HTTP requests")
-    .with_help("active_connections", "Current number of active connections");
-
-let output = observer.render(counters.into_iter()).unwrap();
-// Output will have:
-// # TYPE myapp_http_requests_total counter
-// # TYPE myapp_active_connections gauge
+let counters: Vec<&dyn Observable> = vec![&requests];
+println!("{}", TableObserver::new().with_style(TableStyle::Rounded).render(counters.into_iter()));
 ```
 
-### OpenTelemetryObserver
+### OpenTelemetry (`OtelObserver`)
 
-Exports counters to OpenTelemetry using observable instruments (callbacks). When OpenTelemetry collects metrics, it calls the registered callbacks which read values directly from contatori counters.
-
-```toml
-[dependencies]
-contatori = { version = "0.7", features = ["opentelemetry"] }
-opentelemetry = "0.27"
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
-opentelemetry-stdout = { version = "0.27", features = ["metrics"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-```
-
-```rust
-use contatori::counters::monotone::Monotone;
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
+```rust ignore
+use contatori::{Monotone, Observable, Unsigned};
 use contatori::observers::opentelemetry::OtelObserver;
 
-use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-use opentelemetry_sdk::runtime;
-use std::time::Duration;
-
-// Define static counters
 static HTTP_REQUESTS: Monotone = Monotone::new().with_name("http_requests_total");
 static ACTIVE_CONNECTIONS: Unsigned = Unsigned::new().with_name("active_connections");
 
-#[tokio::main]
-async fn main() {
-    // Setup OpenTelemetry with stdout exporter
-    let exporter = opentelemetry_stdout::MetricExporter::default();
-    let reader = PeriodicReader::builder(exporter, runtime::Tokio)
-        .with_interval(Duration::from_secs(60))
-        .build();
-    let provider = SdkMeterProvider::builder().with_reader(reader).build();
-    opentelemetry::global::set_meter_provider(provider.clone());
-
-    // Register contatori metrics with OpenTelemetry
-    let observer = OtelObserver::new("my_service");
-    let counters: &[&'static (dyn Observable + Send + Sync)] = &[
-        &HTTP_REQUESTS,
-        &ACTIVE_CONNECTIONS,
-    ];
-    observer.register(counters).unwrap();
-
-    // Update counters
-    HTTP_REQUESTS.add(100);
-    ACTIVE_CONNECTIONS.add(5);
-
-    // Flush metrics (they will be printed to stdout)
-    provider.force_flush().unwrap();
-    provider.shutdown().unwrap();
-}
+let observer = OtelObserver::new("my_service");
+observer.register(&[&HTTP_REQUESTS, &ACTIVE_CONNECTIONS])?;
 ```
 
-#### Automatic Metric Type Detection
-
-The observer automatically determines the correct OpenTelemetry instrument type based on the counter's `metric_kind()` method:
-
-| Counter Type | `MetricKind` | OpenTelemetry Type |
-|--------------|--------------|-------------------|
-| `Monotone` | `Counter` | ObservableCounter (u64) |
-| `Unsigned` | `Gauge` | ObservableGauge (f64) |
-| `Signed` | `Gauge` | ObservableGauge (f64) |
-| `Minimum` | `Gauge` | ObservableGauge (f64) |
-| `Maximum` | `Gauge` | ObservableGauge (f64) |
-| `Average` | `Gauge` | ObservableGauge (f64) |
-
-#### OtelObserver Configuration
-
-| Method | Description |
-|--------|-------------|
-| `new(scope_name)` | Creates observer with the given instrumentation scope name |
-| `with_description_prefix(str)` | Adds a prefix to all metric descriptions |
-| `register(&[...])` | Registers static counters with OpenTelemetry |
-
-#### Labeled Groups Support
-
-Labeled groups are automatically exported with OpenTelemetry attributes:
-
-```rust
-use contatori::labeled_group;
-use contatori::counters::unsigned::Unsigned;
-
-labeled_group!(
-    HttpByMethod,
-    "http_requests_by_method",
-    "method",
-    value: Unsigned,
-    get: "GET": Unsigned,
-    post: "POST": Unsigned,
-);
-
-static HTTP_METHODS: HttpByMethod = HttpByMethod::new();
-
-// Each counter becomes a data point with the "method" attribute
-HTTP_METHODS.value.add(150); // Base metric (no label)
-HTTP_METHODS.get.add(100);   // method="GET"
-HTTP_METHODS.post.add(50);   // method="POST"
-```
-
-**Note:** Counters must be `'static` and implement `Send + Sync` to be registered with OpenTelemetry, as the callbacks are invoked asynchronously.
-
-## Adapters 
-
-The library provides adapter types that add additional behavior to counters while maintaining compatibility with the `Observable` trait.
-
-| Wrapper/Macro | Description |
-|---------------|-------------|
-| `Resettable` | Resets counter when `value()` is called - for periodic metrics |
-| `labeled_group!` | Creates a struct of counters with shared metric name and different labels |
-
-### Resettable
-
-Wraps a counter to reset it when `value()` is called. Useful for evaluating metrics over observation periods (e.g., requests per second, errors per minute).
-
-```rust
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
-use contatori::adapters::Resettable;
-
-let requests = Resettable::new(Unsigned::new().with_name("requests_per_period"));
-requests.add(100);
-
-// value() returns the value AND resets the counter
-assert_eq!(requests.value().as_u64(), 100);
-assert_eq!(requests.value().as_u64(), 0); // Reset to 0!
-
-requests.add(50);
-assert_eq!(requests.value().as_u64(), 50); // Just this period
-```
-
-Regular counters (without `Resettable`) keep their value across reads:
-
-```rust
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
-
-let total = Unsigned::new().with_name("total_requests");
-total.add(100);
-
-// value() just reads, does NOT reset
-assert_eq!(total.value().as_u64(), 100);
-assert_eq!(total.value().as_u64(), 100); // Still 100!
-```
-
-### Rate Counter
-
-The `Rate` counter calculates the rate of change (units per second) over time. It's useful for tracking throughput, request rates, or any metric where you need to know "how fast" something is happening.
-
-```rust
-use contatori::counters::rate::Rate;
-use contatori::counters::Observable;
-use std::thread;
-use std::time::Duration;
-
-// Can be used as a static
-static REQUESTS: Rate = Rate::new().with_name("requests_per_sec");
-
-// Increment like a normal counter
-REQUESTS.add(1);
-REQUESTS.add(5);
-
-// Get the absolute count
-println!("Total: {}", REQUESTS.total_value()); // 6
-
-// Get the rate (units per second)
-// First call returns 0.0 and establishes baseline
-let rate1 = REQUESTS.rate(); // 0.0
-
-// Add more and wait
-REQUESTS.add(1000);
-thread::sleep(Duration::from_secs(1));
-
-// Now rate() returns actual rate
-let rate2 = REQUESTS.rate(); // ~1000.0 per second
-```
-
-The `Rate` counter:
-- Uses sharded storage like all other counters (high performance)
-- Can be initialized in `const` context (`static RATE: Rate = Rate::new()`)
-- Returns `MetricKind::Gauge` (rates can go up or down)
-- Exports as float values in Prometheus
-
-## When to Use Sharded Counters
-
-Sharded counters are ideal when:
-- Multiple threads frequently update the same counter
-- Write performance is more important than read performance
-- You're tracking metrics, statistics, or telemetry data
-
-For single-threaded scenarios or rarely-updated counters, a simple `AtomicUsize` may be more appropriate due to lower memory overhead.
-
-## Running Benchmarks
+## Benchmarks & Tests
 
 ```bash
+cargo test --all-features
 cargo bench
-```
-
-## Running Tests
-
-```bash
-cargo test
 ```
 
 ## License

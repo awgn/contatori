@@ -9,14 +9,9 @@
 //! cargo run --example opentelemetry_demo --features opentelemetry
 //! ```
 
-use contatori::counters::average::Average;
-use contatori::counters::monotone::Monotone;
-use contatori::counters::signed::Signed;
-use contatori::counters::unsigned::Unsigned;
-use contatori::counters::Observable;
-use contatori::labeled_group;
 use contatori::observers::opentelemetry::OtelObserver;
 use contatori::observers::Result;
+use contatori::prelude::*;
 
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::runtime;
@@ -29,32 +24,30 @@ static ACTIVE_CONNECTIONS: Unsigned = Unsigned::new().with_name("active_connecti
 static REQUEST_LATENCY: Average = Average::new().with_name("request_latency_ms");
 static QUEUE_DEPTH: Signed = Signed::new().with_name("queue_depth");
 
-// Define labeled groups
+// Define single-label and multi-label groups
 labeled_group!(
     HttpByMethod,
     "http_requests_by_method",
     "method",
-    value: Unsigned,
-    get: "GET": Unsigned,
-    post: "POST": Unsigned,
-    put: "PUT": Unsigned,
-    delete: "DELETE": Unsigned,
+    get: "GET": Monotone,
+    post: "POST": Monotone,
+    put: "PUT": Monotone,
+    delete: "DELETE": Monotone,
 );
 
 static HTTP_METHODS: HttpByMethod = HttpByMethod::new();
 
 labeled_group!(
-    HttpByStatus,
-    "http_responses_by_status",
-    "status",
-    value: Unsigned,
-    ok: "2xx": Unsigned,
-    redirect: "3xx": Unsigned,
-    client_error: "4xx": Unsigned,
-    server_error: "5xx": Unsigned,
+    HttpByRouteStatus,
+    "http_responses_by_route",
+    ["route", "status"],
+    users_ok: ["/api/users", "2xx"]: Monotone,
+    users_client_error: ["/api/users", "4xx"]: Monotone,
+    orders_ok: ["/api/orders", "2xx"]: Monotone,
+    orders_server_error: ["/api/orders", "5xx"]: Monotone,
 );
 
-static HTTP_STATUS: HttpByStatus = HttpByStatus::new();
+static HTTP_ROUTES: HttpByRouteStatus = HttpByRouteStatus::new();
 
 fn setup_opentelemetry() -> SdkMeterProvider {
     // Use the stdout exporter - it prints metrics as JSON
@@ -74,14 +67,14 @@ fn setup_opentelemetry() -> SdkMeterProvider {
 fn register_metrics() -> Result<()> {
     let observer = OtelObserver::new("contatori_demo");
 
-    let counters: &[&'static (dyn Observable + Send + Sync)] = &[
+    let counters: &[&'static dyn Observable] = &[
         &HTTP_REQUESTS,
         &HTTP_ERRORS,
         &ACTIVE_CONNECTIONS,
         &REQUEST_LATENCY,
         &QUEUE_DEPTH,
         &HTTP_METHODS,
-        &HTTP_STATUS,
+        &HTTP_ROUTES,
     ];
 
     observer.register(counters)?;
@@ -90,41 +83,39 @@ fn register_metrics() -> Result<()> {
 }
 
 fn simulate_traffic() {
-    for i in 0..100 {
-        HTTP_REQUESTS.add(1);
+    for i in 0..100_u64 {
+        HTTP_REQUESTS.incr();
 
-        HTTP_METHODS.value.add(1);
         match i % 4 {
-            0 => HTTP_METHODS.get.add(1),
-            1 => HTTP_METHODS.post.add(1),
-            2 => HTTP_METHODS.put.add(1),
-            _ => HTTP_METHODS.delete.add(1),
+            0 => HTTP_METHODS.get.incr(),
+            1 => HTTP_METHODS.post.incr(),
+            2 => HTTP_METHODS.put.incr(),
+            _ => HTTP_METHODS.delete.incr(),
         }
 
-        HTTP_STATUS.value.add(1);
         match i % 10 {
-            0..=6 => HTTP_STATUS.ok.add(1),
-            7 => HTTP_STATUS.redirect.add(1),
+            0..=4 => HTTP_ROUTES.users_ok.incr(),
+            5..=7 => HTTP_ROUTES.orders_ok.incr(),
             8 => {
-                HTTP_STATUS.client_error.add(1);
-                HTTP_ERRORS.add(1);
+                HTTP_ROUTES.users_client_error.incr();
+                HTTP_ERRORS.incr();
             }
             _ => {
-                HTTP_STATUS.server_error.add(1);
-                HTTP_ERRORS.add(1);
+                HTTP_ROUTES.orders_server_error.incr();
+                HTTP_ERRORS.incr();
             }
         }
 
         REQUEST_LATENCY.observe(10 + (i % 90));
 
         if i % 5 == 0 {
-            ACTIVE_CONNECTIONS.add(1);
+            ACTIVE_CONNECTIONS.incr();
         }
         if i % 7 == 0 {
-            QUEUE_DEPTH.add(1);
+            QUEUE_DEPTH.incr();
         }
         if i % 4 == 0 {
-            QUEUE_DEPTH.sub(1);
+            QUEUE_DEPTH.decr();
         }
     }
 }

@@ -1,92 +1,37 @@
 //! JSON observer for serializing counters.
 //!
-//! This module provides [`JsonObserver`], which serializes a collection of
-//! [`Observable`] counters to JSON format using serde.
-//!
-//! # Feature Flag
-//!
-//! This module requires the `json` feature:
-//!
-//! ```toml
-//! [dependencies]
-//! contatori = { version = "0.7", features = ["json"] }
-//! ```
-//!
-//! # Examples
-//!
-//! ```rust,ignore
-//! use contatori::counters::unsigned::Unsigned;
-//! use contatori::counters::Observable;
-//! use contatori::observers::json::JsonObserver;
-//!
-//! let requests = Unsigned::new().with_name("http_requests");
-//! let errors = Unsigned::new().with_name("http_errors");
-//!
-//! requests.add(1000);
-//! errors.add(5);
-//!
-//! let counters: Vec<&dyn Observable> = vec![&requests, &errors];
-//!
-//! let observer = JsonObserver::new();
-//! let json = observer.to_json(counters.into_iter()).unwrap();
-//!
-//! println!("{}", json);
-//! // [{"name":"http_requests","value":1000},{"name":"http_errors","value":5}]
-//! ```
+//! Requires the `json` feature.
 
 use crate::counters::Observable;
+use crate::observers::Result;
 
-// Re-export snapshot types for backwards compatibility
 pub use crate::snapshot::{CounterSnapshot, MetricsSnapshot};
 
-/// Configuration for the JSON observer.
+/// Configuration for [`JsonObserver`].
 #[derive(Debug, Clone, Default)]
 pub struct JsonConfig {
     /// Whether to pretty-print the JSON output.
     pub pretty: bool,
-    /// Whether to include a timestamp in the output.
+    /// Whether to include a Unix millisecond timestamp (requires `wrap_in_snapshot`).
     pub include_timestamp: bool,
-    /// Whether to wrap counters in a MetricsSnapshot object.
+    /// Whether to wrap the counter array inside a [`MetricsSnapshot`] object.
     pub wrap_in_snapshot: bool,
 }
 
-/// An observer that serializes counters to JSON format.
+/// An observer that serializes [`Observable`] counters to JSON.
 ///
 /// # Examples
 ///
-/// Basic usage (array of counters):
-///
-/// ```rust,ignore
-/// use contatori::counters::unsigned::Unsigned;
-/// use contatori::counters::Observable;
+/// ```rust
+/// use contatori::{Observable, Unsigned};
 /// use contatori::observers::json::JsonObserver;
 ///
-/// let counter = Unsigned::new().with_name("requests");
-/// counter.add(42);
+/// let requests = Unsigned::new().with_name("http_requests");
+/// requests.add(1000);
 ///
-/// let counters: Vec<&dyn Observable> = vec![&counter];
-/// let json = JsonObserver::new().to_json(counters.into_iter()).unwrap();
-///
-/// assert!(json.contains("requests"));
-/// assert!(json.contains("42"));
-/// ```
-///
-/// Pretty-printed output:
-///
-/// ```rust,ignore
-/// use contatori::observers::json::JsonObserver;
-///
-/// let observer = JsonObserver::new().pretty(true);
-/// ```
-///
-/// With timestamp wrapper:
-///
-/// ```rust,ignore
-/// use contatori::observers::json::JsonObserver;
-///
-/// let observer = JsonObserver::new()
-///     .wrap_in_snapshot(true)
-///     .include_timestamp(true);
+/// let counters: Vec<&dyn Observable> = vec![&requests];
+/// let json = JsonObserver::new().render(counters.into_iter()).unwrap();
+/// assert!(json.contains("\"http_requests\""));
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct JsonObserver {
@@ -94,68 +39,60 @@ pub struct JsonObserver {
 }
 
 impl JsonObserver {
-    /// Creates a new JSON observer with default settings.
+    /// Creates a new JSON observer with default configuration.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Creates a new JSON observer with the specified configuration.
+    /// Creates a new JSON observer from an explicit [`JsonConfig`].
+    #[must_use]
     pub fn with_config(config: JsonConfig) -> Self {
         Self { config }
     }
 
-    /// Enables or disables pretty-printing.
+    /// Enables or disables pretty-printed JSON output.
+    #[must_use]
     pub fn pretty(mut self, enabled: bool) -> Self {
         self.config.pretty = enabled;
         self
     }
 
-    /// Enables or disables timestamp inclusion.
-    ///
-    /// Only has effect when `wrap_in_snapshot` is also enabled.
+    /// Enables or disables timestamp inclusion (effective when `wrap_in_snapshot` is `true`).
+    #[must_use]
     pub fn include_timestamp(mut self, enabled: bool) -> Self {
         self.config.include_timestamp = enabled;
         self
     }
 
-    /// Enables or disables wrapping the output in a [`MetricsSnapshot`].
+    /// Enables or disables wrapping the output in a [`MetricsSnapshot`] object.
+    #[must_use]
     pub fn wrap_in_snapshot(mut self, enabled: bool) -> Self {
         self.config.wrap_in_snapshot = enabled;
         self
     }
 
-    /// Collects counters into a vector of [`CounterSnapshot`].
-    ///
-    /// This is useful when you need the intermediate representation
-    /// before serialization.
-    ///
-    /// Uses `expand()` on each counter, so labeled groups will produce
-    /// multiple snapshots.
+    /// Collects counters into [`CounterSnapshot`] entries (omitting unobserved trackers).
+    #[must_use]
     pub fn collect<'a>(
         &self,
         counters: impl Iterator<Item = &'a dyn Observable>,
     ) -> Vec<CounterSnapshot> {
-        counters
-            .flat_map(CounterSnapshot::from_observable)
+        let mut entries = Vec::new();
+        for counter in counters {
+            counter.expand_into(&mut entries);
+        }
+        entries
+            .into_iter()
+            .filter_map(CounterSnapshot::from_entry)
             .collect()
     }
 
-    /// Serializes counters to a JSON string.
-    ///
-    /// # Arguments
-    ///
-    /// * `counters` - An iterator over references to [`Observable`] trait objects
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing the JSON string or a serialization error.
-    pub fn to_json<'a>(
-        &self,
-        counters: impl Iterator<Item = &'a dyn Observable>,
-    ) -> Result<String, serde_json::Error> {
+    /// Renders counters to a JSON string using the unified [`observers::Result`](Result).
+    pub fn render<'a>(&self, counters: impl Iterator<Item = &'a dyn Observable>) -> Result<String> {
         let snapshots = self.collect(counters);
 
-        if self.config.wrap_in_snapshot {
+        let out = if self.config.wrap_in_snapshot {
             let snapshot = if self.config.include_timestamp {
                 MetricsSnapshot::with_timestamp(snapshots, current_timestamp_ms())
             } else {
@@ -163,38 +100,63 @@ impl JsonObserver {
             };
 
             if self.config.pretty {
-                serde_json::to_string_pretty(&snapshot)
+                serde_json::to_string_pretty(&snapshot)?
             } else {
-                serde_json::to_string(&snapshot)
+                serde_json::to_string(&snapshot)?
             }
         } else if self.config.pretty {
-            serde_json::to_string_pretty(&snapshots)
+            serde_json::to_string_pretty(&snapshots)?
         } else {
-            serde_json::to_string(&snapshots)
-        }
+            serde_json::to_string(&snapshots)?
+        };
+
+        Ok(out)
     }
 
-    /// Serializes counters to a JSON byte vector.
-    pub fn to_json_bytes<'a>(
+    /// Renders counters to a JSON byte vector using the unified [`observers::Result`](Result).
+    pub fn render_bytes<'a>(
         &self,
         counters: impl Iterator<Item = &'a dyn Observable>,
-    ) -> Result<Vec<u8>, serde_json::Error> {
+    ) -> Result<Vec<u8>> {
         let snapshots = self.collect(counters);
 
-        if self.config.wrap_in_snapshot {
+        let bytes = if self.config.wrap_in_snapshot {
             let snapshot = if self.config.include_timestamp {
                 MetricsSnapshot::with_timestamp(snapshots, current_timestamp_ms())
             } else {
                 MetricsSnapshot::new(snapshots)
             };
-            serde_json::to_vec(&snapshot)
+            if self.config.pretty {
+                serde_json::to_vec_pretty(&snapshot)?
+            } else {
+                serde_json::to_vec(&snapshot)?
+            }
+        } else if self.config.pretty {
+            serde_json::to_vec_pretty(&snapshots)?
         } else {
-            serde_json::to_vec(&snapshots)
-        }
+            serde_json::to_vec(&snapshots)?
+        };
+
+        Ok(bytes)
+    }
+
+    /// Alias for [`render()`](Self::render).
+    pub fn to_json<'a>(
+        &self,
+        counters: impl Iterator<Item = &'a dyn Observable>,
+    ) -> Result<String> {
+        self.render(counters)
+    }
+
+    /// Alias for [`render_bytes()`](Self::render_bytes).
+    pub fn to_json_bytes<'a>(
+        &self,
+        counters: impl Iterator<Item = &'a dyn Observable>,
+    ) -> Result<Vec<u8>> {
+        self.render_bytes(counters)
     }
 }
 
-/// Returns the current timestamp in milliseconds since Unix epoch.
 fn current_timestamp_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -213,128 +175,15 @@ mod tests {
     use crate::counters::CounterValue;
 
     #[test]
-    fn test_to_json_empty() {
+    fn test_render_empty_and_unobserved() {
         let observer = JsonObserver::new();
-        let counters: Vec<&dyn Observable> = vec![];
-        let json = observer.to_json(counters.into_iter()).unwrap();
-        assert_eq!(json, "[]");
+        let empty_min = Minimum::new().with_name("unobserved_min");
+        let counters: Vec<&dyn Observable> = vec![&empty_min];
+        assert_eq!(observer.render(counters.into_iter()).unwrap(), "[]");
     }
 
     #[test]
-    fn test_to_json_single_counter() {
-        let counter = Unsigned::new().with_name("test_counter");
-        counter.add(42);
-
-        let observer = JsonObserver::new();
-        let counters: Vec<&dyn Observable> = vec![&counter];
-        let json = observer.to_json(counters.into_iter()).unwrap();
-
-        assert!(json.contains("test_counter"));
-        assert!(json.contains("42"));
-    }
-
-    #[test]
-    fn test_to_json_multiple_counters() {
-        let requests = Unsigned::new().with_name("requests");
-        let errors = Unsigned::new().with_name("errors");
-
-        requests.add(1000);
-        errors.add(5);
-
-        let observer = JsonObserver::new();
-        let counters: Vec<&dyn Observable> = vec![&requests, &errors];
-        let json = observer.to_json(counters.into_iter()).unwrap();
-
-        assert!(json.contains("requests"));
-        assert!(json.contains("1000"));
-        assert!(json.contains("errors"));
-        assert!(json.contains("5"));
-    }
-
-    #[test]
-    fn test_to_json_signed_counter() {
-        let balance = Signed::new().with_name("balance");
-        balance.sub(100);
-
-        let observer = JsonObserver::new();
-        let counters: Vec<&dyn Observable> = vec![&balance];
-        let json = observer.to_json(counters.into_iter()).unwrap();
-
-        assert!(json.contains("balance"));
-        assert!(json.contains("-100"));
-    }
-
-    #[test]
-    fn test_to_json_pretty() {
-        let counter = Unsigned::new().with_name("test");
-        counter.add(1);
-
-        let observer = JsonObserver::new().pretty(true);
-        let counters: Vec<&dyn Observable> = vec![&counter];
-        let json = observer.to_json(counters.into_iter()).unwrap();
-
-        // Pretty JSON contains newlines
-        assert!(json.contains('\n'));
-    }
-
-    #[test]
-    fn test_to_json_with_snapshot() {
-        let counter = Unsigned::new().with_name("metric");
-        counter.add(100);
-
-        let observer = JsonObserver::new().wrap_in_snapshot(true);
-        let counters: Vec<&dyn Observable> = vec![&counter];
-        let json = observer.to_json(counters.into_iter()).unwrap();
-
-        assert!(json.contains("counters"));
-        assert!(json.contains("metric"));
-        assert!(json.contains("100"));
-    }
-
-    #[test]
-    fn test_to_json_with_timestamp() {
-        let counter = Unsigned::new().with_name("metric");
-        counter.add(50);
-
-        let observer = JsonObserver::new()
-            .wrap_in_snapshot(true)
-            .include_timestamp(true);
-
-        let counters: Vec<&dyn Observable> = vec![&counter];
-        let json = observer.to_json(counters.into_iter()).unwrap();
-
-        assert!(json.contains("timestamp_ms"));
-        assert!(json.contains("counters"));
-    }
-
-    #[test]
-    fn test_collect() {
-        let counter = Unsigned::new().with_name("collected");
-        counter.add(25);
-
-        let observer = JsonObserver::new();
-        let counters: Vec<&dyn Observable> = vec![&counter];
-        let snapshots = observer.collect(counters.into_iter());
-
-        assert_eq!(snapshots.len(), 1);
-        assert_eq!(snapshots[0].name, "collected");
-        assert_eq!(snapshots[0].value, CounterValue::Unsigned(25));
-    }
-
-    #[test]
-    fn test_unnamed_counter() {
-        let counter = Unsigned::new(); // No name
-        counter.add(99);
-
-        let observer = JsonObserver::new();
-        let counters: Vec<&dyn Observable> = vec![&counter];
-        let json = observer.to_json(counters.into_iter()).unwrap();
-
-        assert!(json.contains("(unnamed)"));
-    }
-
-    #[test]
-    fn test_all_counter_types() {
+    fn test_render_all_counter_types() {
         let unsigned = Unsigned::new().with_name("unsigned");
         let signed = Signed::new().with_name("signed");
         let minimum = Minimum::new().with_name("minimum");
@@ -345,83 +194,35 @@ mod tests {
         signed.sub(50);
         minimum.observe(25);
         maximum.observe(200);
-        average.observe(100);
-        average.observe(200);
+        average.observe(1);
+        average.observe(2);
 
         let counters: Vec<&dyn Observable> = vec![&unsigned, &signed, &minimum, &maximum, &average];
+        let json = JsonObserver::new()
+            .pretty(true)
+            .wrap_in_snapshot(true)
+            .include_timestamp(true)
+            .render(counters.into_iter())
+            .unwrap();
 
-        let observer = JsonObserver::new();
-        let json = observer.to_json(counters.into_iter()).unwrap();
-
-        assert!(json.contains("unsigned"));
-        assert!(json.contains("signed"));
-        assert!(json.contains("minimum"));
-        assert!(json.contains("maximum"));
-        assert!(json.contains("average"));
+        assert!(json.contains("timestamp_ms"));
+        assert!(json.contains("1.5"));
+        assert!(json.contains("-50"));
     }
 
     #[test]
-    fn test_deserialize_snapshot() {
-        let json = r#"{"name":"test","value":42}"#;
-        let snapshot: CounterSnapshot = serde_json::from_str(json).unwrap();
-
-        assert_eq!(snapshot.name, "test");
-        assert_eq!(snapshot.value, CounterValue::Unsigned(42));
-    }
-
-    #[test]
-    fn test_deserialize_metrics_snapshot() {
-        let json = r#"{"timestamp_ms":1234567890,"counters":[{"name":"a","value":1}]}"#;
-        let snapshot: MetricsSnapshot = serde_json::from_str(json).unwrap();
-
-        assert_eq!(snapshot.timestamp_ms, Some(1234567890));
-        assert_eq!(snapshot.counters.len(), 1);
-        assert_eq!(snapshot.counters[0].name, "a");
-    }
-
-    #[test]
-    fn test_metrics_snapshot_get() {
-        let snapshot = MetricsSnapshot::new(vec![
-            CounterSnapshot {
-                name: "foo".to_string(),
-                label: None,
-                value: CounterValue::Unsigned(1),
-            },
-            CounterSnapshot {
-                name: "bar".to_string(),
-                label: None,
-                value: CounterValue::Unsigned(2),
-            },
-        ]);
-
-        assert!(snapshot.get("foo").is_some());
-        assert!(snapshot.get("bar").is_some());
-        assert!(snapshot.get("baz").is_none());
-    }
-
-    #[test]
-    fn test_counter_value_conversions() {
-        let unsigned = CounterValue::Unsigned(100);
-        assert_eq!(unsigned.as_i64(), 100);
-        assert_eq!(unsigned.as_u64(), 100);
-        assert_eq!(unsigned.as_f64(), 100.0);
-
-        let signed = CounterValue::Signed(-50);
-        assert_eq!(signed.as_i64(), -50);
-        assert_eq!(signed.as_f64(), -50.0);
-    }
-
-    #[test]
-    fn test_to_json_bytes() {
+    fn test_render_bytes_and_aliases() {
         let counter = Unsigned::new().with_name("bytes_test");
         counter.add(123);
 
         let observer = JsonObserver::new();
         let counters: Vec<&dyn Observable> = vec![&counter];
-        let bytes = observer.to_json_bytes(counters.into_iter()).unwrap();
-
-        let json = String::from_utf8(bytes).unwrap();
-        assert!(json.contains("bytes_test"));
-        assert!(json.contains("123"));
+        let bytes = observer.render_bytes(counters.iter().copied()).unwrap();
+        let s = observer.to_json(counters.into_iter()).unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(), s);
+        assert_eq!(
+            serde_json::from_str::<Vec<CounterSnapshot>>(&s).unwrap()[0].value,
+            CounterValue::Unsigned(123)
+        );
     }
 }

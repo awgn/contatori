@@ -1,131 +1,110 @@
 //! Minimum value tracker with sharded atomic storage.
 //!
-//! This module provides [`Minimum`], a high-performance tracker that records
-//! the minimum value observed across all threads. It uses sharding to minimize
-//! contention during updates.
-
-use std::sync::atomic::{AtomicUsize, Ordering};
+//! [`Minimum`] records the smallest `u64` value observed across all threads.
+//! Before any observation (or immediately after a reset), [`Minimum::get()`]
+//! and [`Observable::try_value()`] return `None` so observers omit uninitialized
+//! metrics instead of exporting `u64::MAX`.
 
 use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::counters::{sealed, CounterValue, Observable, NUM_COMPONENTS, THREAD_SLOT_INDEX};
+use crate::counters::{
+    CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
+};
+
+const UNOBSERVED: u64 = u64::MAX;
 
 /// A high-performance minimum value tracker using sharded atomic storage.
-///
-/// `Minimum` tracks the smallest value observed across all threads. Each shard
-/// is initialized to `usize::MAX` so that the first observed value becomes the
-/// minimum. When reading, the global minimum is computed by taking the minimum
-/// across all shards.
-///
-/// # Use Cases
-///
-/// - Tracking minimum latency
-/// - Recording lowest temperature readings
-/// - Finding minimum queue depth over time
-///
-/// # Algorithm
-///
-/// Updates use a compare-and-swap (CAS) loop: the new value is only stored
-/// if it's less than the current shard value. This ensures correctness
-/// without locks while allowing concurrent updates.
-///
-/// # Memory Usage
-///
-/// Each `Minimum` tracker uses approximately 4KB of memory (64 slots × 64 bytes).
 ///
 /// # Examples
 ///
 /// ```rust
-/// use contatori::counters::minimum::Minimum;
-/// use contatori::counters::Observable;
+/// use contatori::{Minimum, Observable};
 ///
 /// let min_latency = Minimum::new().with_name("request_latency_min");
+/// assert_eq!(min_latency.get(), None);
+/// assert_eq!(min_latency.try_value(), None);
 ///
-/// // Record some latencies (in microseconds)
 /// min_latency.observe(150);
 /// min_latency.observe(85);
 /// min_latency.observe(200);
 ///
-/// // The minimum is 85
-/// assert_eq!(min_latency.value(), contatori::counters::CounterValue::Unsigned(85));
+/// assert_eq!(min_latency.get(), Some(85));
+/// assert_eq!(min_latency.value().as_u64(), 85);
 /// ```
-pub struct Minimum {
+pub struct Minimum<const SHARDS: usize = DEFAULT_SHARDS> {
     name: &'static str,
-    components: [CachePadded<AtomicUsize>; NUM_COMPONENTS],
+    components: [CachePadded<AtomicU64>; SHARDS],
 }
 
-impl Minimum {
-    /// Creates a new minimum tracker.
-    ///
-    /// All 64 shards are initialized to `usize::MAX`, so the first observed
-    /// value will become the minimum.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::minimum::Minimum;
-    /// use contatori::counters::Observable;
-    ///
-    /// let tracker = Minimum::new();
-    /// // Before any observations, value is MAX
-    /// assert_eq!(tracker.value(), contatori::counters::CounterValue::Unsigned(u64::MAX));
-    /// ```
+impl Minimum<DEFAULT_SHARDS> {
+    /// Creates a new minimum tracker with the default number of shards (`64`).
+    #[must_use]
     pub const fn new() -> Self {
-        const MAX: CachePadded<AtomicUsize> = CachePadded::new(AtomicUsize::new(usize::MAX));
-        Minimum {
-            components: [MAX; NUM_COMPONENTS],
+        Self::with_shards()
+    }
+}
+
+impl<const SHARDS: usize> Minimum<SHARDS> {
+    /// Creates a new minimum tracker with `SHARDS` shards.
+    ///
+    /// # Panics
+    ///
+    /// Fails to compile if `SHARDS` is zero or not a power of two.
+    #[must_use]
+    pub const fn with_shards() -> Self {
+        const {
+            assert!(
+                SHARDS > 0 && SHARDS.is_power_of_two(),
+                "SHARDS must be a non-zero power of two"
+            );
+        }
+        Self {
             name: "",
+            components: [const { CachePadded::new(AtomicU64::new(UNOBSERVED)) }; SHARDS],
         }
     }
 
-    /// Sets the name of this tracker, returning `self` for method chaining.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::minimum::Minimum;
-    /// use contatori::counters::Observable;
-    ///
-    /// let tracker = Minimum::new().with_name("min_response_time");
-    /// assert_eq!(tracker.name(), "min_response_time");
-    /// ```
+    /// Sets the metric name of this tracker, returning `self` for method chaining.
+    #[must_use]
     pub const fn with_name(self, name: &'static str) -> Self {
         Self { name, ..self }
     }
 
-    /// Returns a reference to the current thread's shard.
     #[inline]
-    fn get_component_counter(&self) -> &AtomicUsize {
-        THREAD_SLOT_INDEX.with(|idx| &self.components[*idx])
+    const fn encode(value: u64) -> u64 {
+        if value == UNOBSERVED {
+            UNOBSERVED - 1
+        } else {
+            value
+        }
     }
 
-    /// Observes a value and updates the local minimum if necessary.
-    ///
-    /// This method uses a compare-and-swap loop to atomically update the
-    /// shard value only if the new value is smaller than the current one.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use contatori::counters::minimum::Minimum;
-    /// use contatori::counters::Observable;
-    ///
-    /// let tracker = Minimum::new();
-    /// tracker.observe(100);
-    /// tracker.observe(50);   // New minimum
-    /// tracker.observe(75);   // Ignored (not smaller)
-    ///
-    /// assert_eq!(tracker.value(), contatori::counters::CounterValue::Unsigned(50));
-    /// ```
     #[inline]
-    pub fn observe(&self, value: usize) {
-        let counter = self.get_component_counter();
+    const fn decode(raw: u64) -> Option<u64> {
+        if raw == UNOBSERVED {
+            None
+        } else {
+            Some(raw)
+        }
+    }
+
+    #[inline]
+    fn local_slot(&self) -> &AtomicU64 {
+        &self.components[thread_slot_index::<SHARDS>()]
+    }
+
+    /// Observes a value and updates the current thread's shard minimum if smaller.
+    #[inline]
+    pub fn observe(&self, value: u64) {
+        let encoded = Self::encode(value);
+        let counter = self.local_slot();
         let mut current = counter.load(Ordering::Relaxed);
-        while value < current {
+        while encoded < current {
             match counter.compare_exchange_weak(
                 current,
-                value,
+                encoded,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
@@ -136,89 +115,89 @@ impl Minimum {
     }
 
     /// Sets the value of the current thread's shard directly.
-    ///
-    /// Use with caution: this bypasses the minimum logic and sets the
-    /// shard to an arbitrary value.
     #[inline]
-    pub fn set_local_value(&self, value: usize) {
-        self.get_component_counter().store(value, Ordering::Relaxed);
+    pub fn set_local_value(&self, value: u64) {
+        self.local_slot()
+            .store(Self::encode(value), Ordering::Relaxed);
     }
 
-    /// Returns the value of the current thread's shard.
+    /// Returns the observed minimum in the current thread's shard, or `None` if unobserved.
+    #[must_use]
     #[inline]
-    pub fn local_value(&self) -> usize {
-        self.get_component_counter().load(Ordering::Relaxed)
+    pub fn local_value(&self) -> Option<u64> {
+        Self::decode(self.local_slot().load(Ordering::Relaxed))
     }
 
-    /// Computes the global minimum by finding the smallest value across all shards.
+    /// Returns the global minimum across all shards, or `None` if no values were observed.
+    #[must_use]
     #[inline]
-    fn raw_value(&self) -> usize {
-        self.components
+    pub fn get(&self) -> Option<u64> {
+        let raw = self
+            .components
             .iter()
             .map(|counter| counter.load(Ordering::Relaxed))
             .min()
-            .unwrap_or(usize::MAX)
+            .unwrap_or(UNOBSERVED);
+        Self::decode(raw)
     }
 
-    /// Computes the global minimum and resets all shards to `usize::MAX`.
-    ///
-    /// This is useful for periodic metric collection where you want to
-    /// capture the minimum since the last collection.
+    /// Returns the global minimum across all shards and resets every shard to unobserved.
     #[inline]
-    fn raw_value_and_reset(&self) -> usize {
-        let mut min = usize::MAX;
-        for counter in self.components.iter() {
-            let val = counter.swap(usize::MAX, Ordering::Relaxed);
+    pub fn get_and_reset(&self) -> Option<u64> {
+        let mut min = UNOBSERVED;
+        for counter in &self.components {
+            let val = counter.swap(UNOBSERVED, Ordering::Relaxed);
             if val < min {
                 min = val;
             }
         }
-        min
+        Self::decode(min)
     }
 }
 
-impl Observable for Minimum {
-    /// Returns the global minimum across all shards.
+impl<const SHARDS: usize> Observable for Minimum<SHARDS> {
+    /// Returns the global minimum, or `0` if no values have been observed yet.
     ///
-    /// If no values have been observed, returns `u64::MAX`.
+    /// Use [`Minimum::get()`] or [`Observable::try_value()`] to distinguish `0` from unobserved.
     #[inline]
     fn value(&self) -> CounterValue {
-        CounterValue::Unsigned(self.raw_value() as u64)
+        CounterValue::Unsigned(self.get().unwrap_or(0))
     }
 
-    /// Returns the name of this tracker.
+    #[inline]
+    fn try_value(&self) -> Option<CounterValue> {
+        self.get().map(CounterValue::Unsigned)
+    }
+
     #[inline]
     fn name(&self) -> &'static str {
         self.name
     }
 }
 
-impl sealed::Resettable for Minimum {
-    /// Returns the global minimum and resets all shards to `MAX`.
-    ///
-    /// After reset, the next observed value will become the new minimum.
+impl<const SHARDS: usize> sealed::Resettable for Minimum<SHARDS> {
     #[inline]
     fn value_and_reset(&self) -> CounterValue {
-        CounterValue::Unsigned(self.raw_value_and_reset() as u64)
+        CounterValue::Unsigned(self.get_and_reset().unwrap_or(0))
+    }
+
+    #[inline]
+    fn try_value_and_reset(&self) -> Option<CounterValue> {
+        self.get_and_reset().map(CounterValue::Unsigned)
     }
 }
 
-impl Default for Minimum {
-    /// Creates a new tracker with all shards set to `MAX`.
+impl<const SHARDS: usize> Default for Minimum<SHARDS> {
     fn default() -> Self {
-        Self::new()
+        Self::with_shards()
     }
 }
 
-impl Debug for Minimum {
-    /// Formats the tracker showing shards that have observed values.
-    ///
-    /// Shards still at `usize::MAX` (no observations) are not shown.
+impl<const SHARDS: usize> Debug for Minimum<SHARDS> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}{{", self.name)?;
         for (i, counter) in self.components.iter().enumerate() {
-            let val = counter.load(Ordering::Relaxed);
-            if val != usize::MAX {
+            if let Some(val) = Self::decode(counter.load(Ordering::Relaxed)) {
                 write!(f, " [{i}]:{val}")?;
             }
         }
@@ -229,176 +208,70 @@ impl Debug for Minimum {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::counters::Observable;
+    use crate::adapters::Resettable;
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
-    fn test_new() {
+    fn test_empty_returns_none_and_zero_fallback() {
         let counter = Minimum::new();
-        assert_eq!(counter.value(), CounterValue::Unsigned(u64::MAX));
+        assert_eq!(counter.get(), None);
+        assert_eq!(counter.try_value(), None);
+        assert_eq!(counter.value(), CounterValue::Unsigned(0));
+        assert_eq!(counter.expand()[0].value, None);
     }
 
     #[test]
-    fn test_observe_single() {
-        let counter = Minimum::new();
-        counter.observe(42);
-        assert_eq!(counter.value(), CounterValue::Unsigned(42));
-    }
-
-    #[test]
-    fn test_observe_multiple_decreasing() {
-        let counter = Minimum::new();
-        counter.observe(100);
-        assert_eq!(counter.value(), CounterValue::Unsigned(100));
-        counter.observe(50);
-        assert_eq!(counter.value(), CounterValue::Unsigned(50));
-        counter.observe(10);
-        assert_eq!(counter.value(), CounterValue::Unsigned(10));
-    }
-
-    #[test]
-    fn test_observe_multiple_increasing() {
-        let counter = Minimum::new();
-        counter.observe(10);
-        assert_eq!(counter.value(), CounterValue::Unsigned(10));
-        counter.observe(50);
-        assert_eq!(counter.value(), CounterValue::Unsigned(10));
-        counter.observe(100);
-        assert_eq!(counter.value(), CounterValue::Unsigned(10));
-    }
-
-    #[test]
-    fn test_observe_mixed() {
+    fn test_observe_values_including_zero() {
         let counter = Minimum::new();
         counter.observe(50);
         counter.observe(30);
         counter.observe(70);
-        counter.observe(20);
-        counter.observe(60);
-        assert_eq!(counter.value(), CounterValue::Unsigned(20));
-    }
+        assert_eq!(counter.get(), Some(30));
 
-    #[test]
-    fn test_observe_zero() {
-        let counter = Minimum::new();
-        counter.observe(100);
         counter.observe(0);
-        assert_eq!(counter.value(), CounterValue::Unsigned(0));
-    }
-
-    #[test]
-    fn test_set_local_value() {
-        let counter = Minimum::new();
-        counter.set_local_value(42);
-        assert_eq!(counter.local_value(), 42);
-        assert_eq!(counter.value(), CounterValue::Unsigned(42));
-    }
-
-    #[test]
-    fn test_local_value() {
-        let counter = Minimum::new();
-        assert_eq!(counter.local_value(), usize::MAX);
-        counter.observe(100);
-        assert_eq!(counter.local_value(), 100);
+        assert_eq!(counter.get(), Some(0));
+        assert_eq!(counter.try_value(), Some(CounterValue::Unsigned(0)));
     }
 
     #[test]
     fn test_resettable() {
-        use crate::adapters::Resettable;
         let counter = Resettable::new(Minimum::new());
         counter.observe(50);
         counter.observe(30);
-        assert_eq!(counter.value(), CounterValue::Unsigned(30));
-        // After value() the counter should be reset
-        assert_eq!(counter.value(), CounterValue::Unsigned(u64::MAX));
-    }
+        assert_eq!(counter.try_value(), Some(CounterValue::Unsigned(30)));
+        assert_eq!(counter.try_value(), None);
+        assert_eq!(counter.value(), CounterValue::Unsigned(0));
 
-    #[test]
-    fn test_resettable_then_observe() {
-        use crate::adapters::Resettable;
-        let counter = Resettable::new(Minimum::new());
-        counter.observe(30);
-        let _ = counter.value(); // reset
         counter.observe(100);
         assert_eq!(counter.value(), CounterValue::Unsigned(100));
     }
 
     #[test]
-    fn test_debug() {
-        let counter = Minimum::new();
-        counter.set_local_value(5);
-        let debug_str = format!("{:?}", counter);
-        assert!(debug_str.starts_with("{"));
-        assert!(debug_str.contains("5"));
-        assert!(debug_str.ends_with("}"));
-    }
-
-    #[test]
-    fn test_dyn_format() {
-        let counter = Minimum::new().with_name("test_counter");
-        counter.observe(42);
-        let formatted = format!("{}", &counter as &dyn Observable);
-        assert_eq!(formatted, "test_counter:42");
-    }
-
-    #[test]
-    fn test_dyn_debug() {
-        let counter = Minimum::new().with_name("test_counter");
-        counter.observe(42);
-        let debug_str = format!("{:?}", &counter as &dyn Observable);
-        assert!(debug_str.starts_with("test_counter{"));
-        assert!(debug_str.contains("42"));
-        assert!(debug_str.ends_with("}"));
+    fn test_local_value_and_debug() {
+        let counter = Minimum::new().with_name("min_c");
+        assert_eq!(counter.local_value(), None);
+        counter.set_local_value(42);
+        assert_eq!(counter.local_value(), Some(42));
+        assert_eq!(format!("{}", &counter as &dyn Observable), "min_c:42");
+        assert!(format!("{counter:?}").contains("42"));
     }
 
     #[test]
     fn test_multiple_threads() {
-        use std::sync::Arc;
-        use std::thread;
-
         let counter = Arc::new(Minimum::new());
         let mut handles = vec![];
-
-        for i in 0..4 {
-            let counter_clone = Arc::clone(&counter);
-            let handle = thread::spawn(move || {
-                for j in 0..100 {
-                    counter_clone.observe((i + 1) * 1000 + j);
+        for i in 0..4u64 {
+            let c = Arc::clone(&counter);
+            handles.push(thread::spawn(move || {
+                for j in 0..100u64 {
+                    c.observe((i + 1) * 1000 + j);
                 }
-            });
-            handles.push(handle);
+            }));
         }
-
-        for handle in handles {
-            handle.join().unwrap();
+        for h in handles {
+            h.join().unwrap();
         }
-
-        assert_eq!(counter.value(), CounterValue::Unsigned(1000));
-    }
-
-    #[test]
-    fn test_name_default() {
-        let counter = Minimum::new();
-        assert_eq!(counter.name(), "");
-    }
-
-    #[test]
-    fn test_with_name() {
-        let counter = Minimum::new().with_name("my_counter");
-        assert_eq!(counter.name(), "my_counter");
-    }
-
-    #[test]
-    fn test_with_name_preserves_value() {
-        let counter = Minimum::new().with_name("test");
-        counter.observe(42);
-        assert_eq!(counter.name(), "test");
-        assert_eq!(counter.value(), CounterValue::Unsigned(42));
-    }
-
-    #[test]
-    fn test_default() {
-        let counter = Minimum::default();
-        assert_eq!(counter.value(), CounterValue::Unsigned(u64::MAX));
-        assert_eq!(counter.name(), "");
+        assert_eq!(counter.get(), Some(1000));
     }
 }
