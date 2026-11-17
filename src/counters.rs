@@ -44,9 +44,48 @@ use serde::{Deserialize, Serialize};
 use std::{
     cell::Cell,
     fmt::{Debug, Display},
-    ops::{Add, AddAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, Deref, DerefMut, Sub, SubAssign},
     sync::atomic::{AtomicUsize, Ordering},
 };
+
+/// Pads and aligns a value to 128 bytes (256 bytes on `s390x`) to eliminate
+/// both direct cache-line false sharing and L2 spatial-prefetcher false sharing
+/// across all supported 64-bit and 32-bit architectures.
+#[cfg_attr(target_arch = "s390x", repr(align(256)))]
+#[cfg_attr(not(target_arch = "s390x"), repr(align(128)))]
+#[derive(Clone, Copy, Default, Hash, PartialEq, Eq)]
+pub(crate) struct CachePadded<T> {
+    value: T,
+}
+
+impl<T> CachePadded<T> {
+    #[inline]
+    pub(crate) const fn new(value: T) -> Self {
+        Self { value }
+    }
+}
+
+impl<T> Deref for CachePadded<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> DerefMut for CachePadded<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
+
+impl<T: Debug> Debug for CachePadded<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("CachePadded").field(&self.value).finish()
+    }
+}
 
 /// Default number of shards (slots) used by each counter.
 ///
@@ -536,5 +575,18 @@ mod tests {
         a += CounterValue::Unsigned(20);
         a -= CounterValue::Signed(5);
         assert_eq!(a, CounterValue::Signed(25));
+    }
+
+    #[test]
+    fn cache_padded_alignment_and_counter_layout() {
+        assert!(std::mem::align_of::<super::CachePadded<u64>>() >= 128);
+        assert!(std::mem::size_of::<super::CachePadded<u64>>() >= 128);
+        assert!(std::mem::align_of::<super::unsigned::Unsigned>() >= 128);
+        assert!(std::mem::align_of::<super::monotone::Monotone>() >= 128);
+        assert!(std::mem::align_of::<super::signed::Signed>() >= 128);
+        assert!(std::mem::align_of::<super::minimum::Minimum>() >= 128);
+        assert!(std::mem::align_of::<super::maximum::Maximum>() >= 128);
+        assert!(std::mem::align_of::<super::average::Average>() >= 128);
+        assert!(std::mem::align_of::<super::rate::Rate>() >= 128);
     }
 }

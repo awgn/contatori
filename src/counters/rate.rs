@@ -8,14 +8,13 @@
 //! `Mutex` with a minimum sampling step so multiple concurrent observers can read the
 //! rate idempotently without resetting each other's window.
 
-use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::counters::{
-    CounterValue, DEFAULT_SHARDS, MetricKind, Observable, sealed, thread_slot_index,
+    CachePadded, CounterValue, DEFAULT_SHARDS, MetricKind, Observable, sealed, thread_slot_index,
 };
 
 /// Default EWMA smoothing time constant (`5 seconds`).
@@ -62,11 +61,12 @@ impl RateState {
 ///     .with_name("requests_per_sec")
 ///     .with_window(Duration::from_secs(5));
 /// ```
+#[repr(C)]
 pub struct Rate<const SHARDS: usize = DEFAULT_SHARDS> {
-    name: &'static str,
-    window: Duration,
     components: [CachePadded<AtomicU64>; SHARDS],
     state: Mutex<RateState>,
+    name: &'static str,
+    window: Duration,
 }
 
 impl Rate<DEFAULT_SHARDS> {

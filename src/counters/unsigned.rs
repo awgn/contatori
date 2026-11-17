@@ -4,12 +4,11 @@
 //! concurrent updates from multiple threads. It uses sharding to minimize
 //! contention and cache-line padding to prevent false sharing.
 
-use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::counters::{
-    CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
+    CachePadded, CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
 };
 
 /// A high-performance unsigned 64-bit integer counter using sharded atomic storage.
@@ -33,9 +32,10 @@ use crate::counters::{
 /// counter.add(5);
 /// assert_eq!(counter.value().as_u64(), 6);
 /// ```
+#[repr(C)]
 pub struct Unsigned<const SHARDS: usize = DEFAULT_SHARDS> {
-    name: &'static str,
     components: [CachePadded<AtomicU64>; SHARDS],
+    name: &'static str,
 }
 
 impl Unsigned<DEFAULT_SHARDS> {

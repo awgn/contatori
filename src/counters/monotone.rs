@@ -4,12 +4,11 @@
 //! [`MetricKind::Counter`], making it ideal for cumulative counters in Prometheus
 //! and OpenTelemetry.
 
-use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::counters::{
-    CounterValue, DEFAULT_SHARDS, MetricKind, Observable, sealed, thread_slot_index,
+    CachePadded, CounterValue, DEFAULT_SHARDS, MetricKind, Observable, sealed, thread_slot_index,
 };
 
 /// A high-performance monotonically increasing 64-bit counter.
@@ -29,9 +28,10 @@ use crate::counters::{
 /// assert_eq!(requests.metric_kind(), MetricKind::Counter);
 /// assert_eq!(requests.value().as_u64(), 5);
 /// ```
+#[repr(C)]
 pub struct Monotone<const SHARDS: usize = DEFAULT_SHARDS> {
-    name: &'static str,
     components: [CachePadded<AtomicU64>; SHARDS],
+    name: &'static str,
 }
 
 impl Monotone<DEFAULT_SHARDS> {

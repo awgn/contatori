@@ -5,12 +5,11 @@
 //! and [`Observable::try_value()`] return `None` so observers omit uninitialized
 //! metrics instead of exporting `u64::MAX`.
 
-use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::counters::{
-    CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
+    CachePadded, CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
 };
 
 pub(crate) const UNOBSERVED: u64 = u64::MAX;
@@ -33,9 +32,10 @@ pub(crate) const UNOBSERVED: u64 = u64::MAX;
 /// assert_eq!(min_latency.get(), Some(85));
 /// assert_eq!(min_latency.value().as_u64(), 85);
 /// ```
+#[repr(C)]
 pub struct Minimum<const SHARDS: usize = DEFAULT_SHARDS> {
-    name: &'static str,
     components: [CachePadded<AtomicU64>; SHARDS],
+    name: &'static str,
 }
 
 impl Minimum<DEFAULT_SHARDS> {

@@ -22,7 +22,7 @@ full = ["table", "json", "prometheus", "opentelemetry"]
 demo = ["full", "dep:clap"]
 
 [dependencies]
-crossbeam-utils = "0.8.21"
+# Core crate has zero required external dependencies!
 
 # Optional dependencies for observers
 tabled = { version = "0.20", optional = true }

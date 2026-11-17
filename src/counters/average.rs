@@ -4,14 +4,14 @@
 //! returning floating-point averages via [`Observable::value()`] (`CounterValue::Float`)
 //! and `None` via [`Observable::try_value()`] before any observations occur.
 
-use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::counters::{
-    CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
+    CachePadded, CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
 };
 
+#[repr(C)]
 struct SumCount {
     sum: AtomicU64,
     count: AtomicU64,
@@ -42,9 +42,10 @@ impl SumCount {
 /// assert_eq!(avg.average_f64(), Some(12.5));
 /// assert_eq!(avg.value(), CounterValue::Float(12.5));
 /// ```
+#[repr(C)]
 pub struct Average<const SHARDS: usize = DEFAULT_SHARDS> {
-    name: &'static str,
     components: [CachePadded<SumCount>; SHARDS],
+    name: &'static str,
 }
 
 impl Average<DEFAULT_SHARDS> {

@@ -13,7 +13,7 @@ In multi-threaded applications, updating a single shared atomic variable from ma
 `contatori` distributes each counter across multiple cache-line-padded shards (`64` by default, configurable via const generics `SHARDS`):
 
 1. **Per-Thread Sharding**: Each thread caches a monotonically assigned ID in a `const`-initialized `thread_local!` `Cell` and indexes its shard via `id & (SHARDS - 1)`.
-2. **Cache-Line Padding**: Every shard is wrapped in [`crossbeam_utils::CachePadded`] (128-byte aligned on `x86_64` and `aarch64`) to prevent **false sharing**.
+2. **Cache-Line Padding**: Every shard is wrapped in a 128-byte aligned `CachePadded` slot (256-byte on `s390x`) to prevent both direct and prefetcher-induced **false sharing**.
 3. **Relaxed Atomic Ordering**: Hot-path updates use `Ordering::Relaxed` (single atomic instruction, zero locks, zero syscalls).
 4. **Aggregation on Read**: Global values are computed only when observed, trading slightly more work on cold reads for massive throughput on hot writes.
 

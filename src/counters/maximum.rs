@@ -5,12 +5,11 @@
 //! `observe(0)` to be distinguished accurately from "no observations yet" in a
 //! single lock-free `AtomicU64`.
 
-use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::counters::{
-    CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
+    CachePadded, CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
 };
 
 pub(crate) const UNOBSERVED: u64 = 0;
@@ -32,9 +31,10 @@ pub(crate) const UNOBSERVED: u64 = 0;
 /// max_latency.observe(120);
 /// assert_eq!(max_latency.get(), Some(200));
 /// ```
+#[repr(C)]
 pub struct Maximum<const SHARDS: usize = DEFAULT_SHARDS> {
-    name: &'static str,
     components: [CachePadded<AtomicU64>; SHARDS],
+    name: &'static str,
 }
 
 impl Maximum<DEFAULT_SHARDS> {

@@ -3,12 +3,11 @@
 //! [`Signed`] supports both positive and negative updates across threads,
 //! making it ideal for gauges such as active connections, queue depth, or balance tracking.
 
-use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::counters::{
-    CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
+    CachePadded, CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
 };
 
 /// A high-performance signed 64-bit integer counter using sharded atomic storage.
@@ -24,9 +23,10 @@ use crate::counters::{
 /// connections.decr();
 /// assert_eq!(connections.value().as_i64(), 1);
 /// ```
+#[repr(C)]
 pub struct Signed<const SHARDS: usize = DEFAULT_SHARDS> {
-    name: &'static str,
     components: [CachePadded<AtomicI64>; SHARDS],
+    name: &'static str,
 }
 
 impl Signed<DEFAULT_SHARDS> {
