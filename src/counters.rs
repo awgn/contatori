@@ -95,29 +95,122 @@ impl<T: Debug> Debug for CachePadded<T> {
 /// concurrently with zero cache-line contention.
 pub const DEFAULT_SHARDS: usize = 64;
 
-/// Global counter for assigning sequential IDs to threads.
-static NEXT_SLOT_ID: AtomicUsize = AtomicUsize::new(0);
+/// Number of logical thread ranks tracked for zero-collision slot recycling.
+const MAX_TRACKED_RANKS: usize = 256;
+
+/// Global occupancy table tracking how many live threads hold each logical rank `0..256`.
+///
+/// Cache-line padded so `.bss` placement never shares a cache line with unrelated statics.
+/// Only accessed on thread initialization and thread exit (`#[cold]`).
+static RANK_OCCUPANCY: CachePadded<[AtomicUsize; MAX_TRACKED_RANKS]> =
+    CachePadded::new([const { AtomicUsize::new(0) }; MAX_TRACKED_RANKS]);
+
+/// Separate padded cursor for `get_next_slot_id()` and overflow tie-breaking so external
+/// calls never perturb `RANK_OCCUPANCY`.
+static NEXT_SLOT_CURSOR: CachePadded<AtomicUsize> = CachePadded::new(AtomicUsize::new(0));
+
+struct RankGuard(usize);
+
+impl Drop for RankGuard {
+    fn drop(&mut self) {
+        RANK_OCCUPANCY[self.0].fetch_sub(1, Ordering::Relaxed);
+        let _ = THREAD_REV_RANK.try_with(|c| c.set(usize::MAX));
+    }
+}
 
 thread_local! {
-    /// Thread-local raw ID assigned to the current thread.
+    /// Fast-path TLS cell holding `rank.reverse_bits()` (`usize::MAX` = uninitialized).
     ///
-    /// Uses `usize::MAX` as the uninitialized sentinel so TLS initialization
-    /// is `const` and fast on the hot path.
-    static THREAD_SLOT_ID: Cell<usize> = const { Cell::new(usize::MAX) };
+    /// Has no `Drop` glue so hot-path accesses compile to direct TLS loads without
+    /// destructor liveness checks.
+    static THREAD_REV_RANK: Cell<usize> = const { Cell::new(usize::MAX) };
+
+    /// Cold destructor guard that releases the thread's rank when the OS thread exits.
+    static THREAD_RANK_GUARD: Cell<Option<RankGuard>> = const { Cell::new(None) };
+}
+
+fn acquire_rank() -> usize {
+    // Fast scan: claim the lowest unoccupied rank so K live threads always occupy 0..K.
+    for (rank, slot) in RANK_OCCUPANCY.iter().enumerate() {
+        if slot.load(Ordering::Relaxed) == 0
+            && slot
+                .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            return rank;
+        }
+    }
+
+    // Fallback when >= 256 threads are simultaneously active: pick least-loaded rank.
+    let start = NEXT_SLOT_CURSOR.fetch_add(1, Ordering::Relaxed) & (MAX_TRACKED_RANKS - 1);
+    let mut best_rank = start;
+    let mut best_load = usize::MAX;
+    for offset in 0..MAX_TRACKED_RANKS {
+        let rank = (start + offset) & (MAX_TRACKED_RANKS - 1);
+        let load = RANK_OCCUPANCY[rank].load(Ordering::Relaxed);
+        if load < best_load {
+            best_load = load;
+            best_rank = rank;
+            if load == 0 {
+                break;
+            }
+        }
+    }
+    RANK_OCCUPANCY[best_rank].fetch_add(1, Ordering::Relaxed);
+    best_rank
 }
 
 #[cold]
 #[inline(never)]
-fn init_thread_slot_id(cell: &Cell<usize>) -> usize {
-    let raw = NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed);
-    // Reserve usize::MAX as the uninitialized sentinel.
-    let id = if raw == usize::MAX {
-        NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed)
-    } else {
-        raw
+fn init_thread_rev_rank(cell: &Cell<usize>) -> usize {
+    let rev = match THREAD_RANK_GUARD.try_with(|guard_cell| {
+        let rank = acquire_rank();
+        guard_cell.set(Some(RankGuard(rank)));
+        rank.reverse_bits()
+    }) {
+        Ok(rev) => rev,
+        Err(_) => {
+            // Late TLS teardown fallback: do not increment RANK_OCCUPANCY.
+            let transient =
+                NEXT_SLOT_CURSOR.fetch_add(1, Ordering::Relaxed) & (MAX_TRACKED_RANKS - 1);
+            transient.reverse_bits()
+        }
     };
-    cell.set(id);
-    id
+    cell.set(rev);
+    rev
+}
+
+/// Returns the current thread's bit-reversed rank from TLS.
+#[inline]
+pub(crate) fn thread_raw_rev_rank() -> usize {
+    THREAD_REV_RANK.with(|cell| {
+        let v = cell.get();
+        if v != usize::MAX {
+            v
+        } else {
+            init_thread_rev_rank(cell)
+        }
+    })
+}
+
+/// Maps a bit-reversed thread rank into `[0, SHARDS)` via a single shift.
+///
+/// Using the top `log2(SHARDS)` bits of `rank.reverse_bits()` forms a Van der Corput
+/// low-discrepancy permutation, maximally separating active threads across cache lines
+/// to defeat L2 spatial/adjacent-line prefetcher false sharing.
+#[inline]
+pub(crate) const fn slot_from_rev_rank<const SHARDS: usize>(rev: usize) -> usize {
+    const {
+        assert!(
+            SHARDS > 0 && SHARDS.is_power_of_two(),
+            "SHARDS must be a non-zero power of two"
+        );
+    }
+    if SHARDS == 1 {
+        0
+    } else {
+        rev >> (usize::BITS - SHARDS.trailing_zeros())
+    }
 }
 
 /// Returns the current thread's shard index in `[0, SHARDS)`.
@@ -131,21 +224,18 @@ pub(crate) fn thread_slot_index<const SHARDS: usize>() -> usize {
             "SHARDS must be a non-zero power of two"
         );
     }
-    let id = THREAD_SLOT_ID.with(|cell| {
-        let v = cell.get();
-        if v != usize::MAX {
-            v
-        } else {
-            init_thread_slot_id(cell)
-        }
-    });
-    id & (SHARDS - 1)
+    if SHARDS == 1 {
+        0
+    } else {
+        slot_from_rev_rank::<SHARDS>(thread_raw_rev_rank())
+    }
 }
 
-/// Assigns the next available slot ID modulo [`DEFAULT_SHARDS`].
+/// Assigns the next slot ID modulo [`DEFAULT_SHARDS`] without perturbing thread shard assignments.
 #[inline]
 pub fn get_next_slot_id() -> usize {
-    NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed) & (DEFAULT_SHARDS - 1)
+    let raw = NEXT_SLOT_CURSOR.fetch_add(1, Ordering::Relaxed) & (DEFAULT_SHARDS - 1);
+    slot_from_rev_rank::<DEFAULT_SHARDS>(raw.reverse_bits())
 }
 
 /// Represents the value of a counter, supporting unsigned, signed, and floating-point types.
@@ -489,14 +579,69 @@ mod tests {
 
     #[test]
     fn thread_slot_masks_correctly_for_multiple_shard_counts() {
+        let idx1 = thread_slot_index::<1>();
         let idx16 = thread_slot_index::<16>();
         let idx64 = thread_slot_index::<64>();
         let idx128 = thread_slot_index::<128>();
+        assert_eq!(idx1, 0);
         assert!(idx16 < 16);
         assert!(idx64 < 64);
         assert!(idx128 < 128);
-        assert_eq!(idx16, idx64 & 15);
-        assert_eq!(idx64, idx128 & 63);
+        // Under bit-reversal, smaller shard indices are prefixes (right-shifts) of larger ones.
+        assert_eq!(idx16, idx64 >> 2);
+        assert_eq!(idx64, idx128 >> 1);
+    }
+
+    #[test]
+    fn thread_slot_recycles_under_churn_and_scatters_cache_lines() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        // Churn 200 short-lived threads; each acquires and releases a rank on exit.
+        for _ in 0..200 {
+            thread::spawn(|| {
+                let _ = thread_slot_index::<64>();
+            })
+            .join()
+            .unwrap();
+        }
+
+        // Now spawn 7 concurrent worker threads (+ this test thread = 8 simultaneous threads)
+        // and verify zero collisions on SHARDS = 16 and SHARDS = 64, plus wide spacing on 64.
+        let barrier = Arc::new(Barrier::new(7));
+        let mut handles = Vec::new();
+        for _ in 0..7 {
+            let b = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                let s16 = thread_slot_index::<16>();
+                let s64 = thread_slot_index::<64>();
+                b.wait();
+                (s16, s64)
+            }));
+        }
+
+        let mut slots16 = HashSet::new();
+        let mut slots64 = Vec::new();
+        for h in handles {
+            let (s16, s64) = h.join().unwrap();
+            slots16.insert(s16);
+            slots64.push(s64);
+        }
+
+        assert_eq!(slots16.len(), 7, "expected zero collisions on SHARDS=16");
+        let unique64: HashSet<_> = slots64.iter().copied().collect();
+        assert_eq!(unique64.len(), 7, "expected zero collisions on SHARDS=64");
+
+        // Verify Van der Corput scattering: ranks 0..8 map to multiples of 8 (0, 32, 16, 48, ...)
+        // when <= 8 threads are active, keeping active slots far apart in memory.
+        slots64.sort_unstable();
+        for pair in slots64.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= 2,
+                "expected scattered slots (>= 256B apart), got {slots64:?}"
+            );
+        }
     }
 
     #[test]
