@@ -8,7 +8,8 @@ use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::counters::{
-    CachePadded, CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
+    CachePadded, CounterValue, DEFAULT_SHARDS, Observable, sealed, slot_from_rev_rank,
+    thread_slot_index,
 };
 
 /// A high-performance unsigned 64-bit integer counter using sharded atomic storage.
@@ -75,6 +76,11 @@ impl<const SHARDS: usize> Unsigned<SHARDS> {
     #[inline]
     fn local_slot(&self) -> &AtomicU64 {
         &self.components[thread_slot_index::<SHARDS>()]
+    }
+
+    #[inline]
+    pub(crate) fn add_at_rev_rank(&self, rev_rank: usize, value: u64) {
+        self.components[slot_from_rev_rank::<SHARDS>(rev_rank)].fetch_add(value, Ordering::Relaxed);
     }
 
     /// Increments the counter by `1`.

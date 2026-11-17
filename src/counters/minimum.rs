@@ -9,7 +9,8 @@ use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::counters::{
-    CachePadded, CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
+    CachePadded, CounterValue, DEFAULT_SHARDS, Observable, sealed, slot_from_rev_rank,
+    thread_slot_index,
 };
 
 pub(crate) const UNOBSERVED: u64 = u64::MAX;
@@ -93,6 +94,14 @@ impl<const SHARDS: usize> Minimum<SHARDS> {
     #[inline]
     fn local_slot(&self) -> &AtomicU64 {
         &self.components[thread_slot_index::<SHARDS>()]
+    }
+
+    #[inline]
+    pub(crate) fn observe_encoded_at_rev_rank(&self, rev_rank: usize, encoded: u64) {
+        let counter = &self.components[slot_from_rev_rank::<SHARDS>(rev_rank)];
+        if encoded < counter.load(Ordering::Relaxed) {
+            counter.fetch_min(encoded, Ordering::Relaxed);
+        }
     }
 
     #[inline]

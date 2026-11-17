@@ -163,6 +163,69 @@ impl<'a, G: sealed::BatchableGroup> DerefMut for Local<'a, G> {
     }
 }
 
+/// Compact pointer-free, `Drop`-free field accumulator used inside [`Local`] for
+/// [`labeled_group!`](crate::labeled_group) structs.
+///
+/// Unlike [`Local<'a, C>`](Local), `LocalField<C>` stores **only** the raw numeric accumulator
+/// (`8` bytes for integer/extremum counters, `16` bytes for [`Average`]) without duplicating
+/// `&'a C` pointers or per-field `Drop` glue, allowing the entire group accumulator to stay in
+/// CPU registers during batch loops.
+#[repr(transparent)]
+pub struct LocalField<C: sealed::CounterBatchable> {
+    acc: C::RawAcc,
+}
+
+impl<C: sealed::CounterBatchable> Copy for LocalField<C> {}
+
+impl<C: sealed::CounterBatchable> Clone for LocalField<C> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<C: sealed::CounterBatchable> Default for LocalField<C> {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<C: sealed::CounterBatchable> Debug for LocalField<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Debug::fmt(&self.acc, f)
+    }
+}
+
+impl<C: sealed::CounterBatchable> LocalField<C> {
+    /// Creates an empty field accumulator.
+    #[must_use]
+    #[inline]
+    pub const fn new() -> Self {
+        Self { acc: C::EMPTY_RAW }
+    }
+
+    /// Returns `true` if there are buffered updates in this field.
+    #[must_use]
+    #[inline]
+    pub fn has_pending(&self) -> bool {
+        C::has_pending_raw(&self.acc)
+    }
+
+    /// Discards buffered updates in this field without flushing them.
+    #[inline]
+    pub fn discard(&mut self) {
+        self.acc = C::EMPTY_RAW;
+    }
+
+    /// Internal helper used by `labeled_group!` to flush into `counter` using a pre-fetched TLS rank.
+    #[doc(hidden)]
+    #[inline]
+    pub fn __flush_into(&mut self, counter: &C, rev_rank: usize) {
+        counter.flush_raw_at_rev_rank(rev_rank, &mut self.acc);
+    }
+}
+
 // ============================================================================
 // Monotone<SHARDS>
 // ============================================================================
@@ -195,7 +258,47 @@ impl<const SHARDS: usize> sealed::Batchable for Monotone<SHARDS> {
     }
 }
 
+impl<const SHARDS: usize> sealed::CounterBatchable for Monotone<SHARDS> {
+    type RawAcc = u64;
+    const EMPTY_RAW: u64 = 0;
+
+    #[inline]
+    fn has_pending_raw(acc: &u64) -> bool {
+        *acc != 0
+    }
+
+    #[inline]
+    fn flush_raw_at_rev_rank(&self, rev_rank: usize, acc: &mut u64) {
+        let delta = *acc;
+        if delta != 0 {
+            self.add_at_rev_rank(rev_rank, delta);
+            *acc = 0;
+        }
+    }
+}
+
 impl<const SHARDS: usize> Local<'_, Monotone<SHARDS>> {
+    /// Buffers an addition of `value` locally.
+    #[inline]
+    pub fn add(&mut self, value: u64) {
+        self.acc = self.acc.wrapping_add(value);
+    }
+
+    /// Buffers an increment of `1` locally.
+    #[inline]
+    pub fn incr(&mut self) {
+        self.add(1);
+    }
+
+    /// Returns the currently buffered unflushed delta.
+    #[must_use]
+    #[inline]
+    pub const fn pending(&self) -> u64 {
+        self.acc
+    }
+}
+
+impl<const SHARDS: usize> LocalField<Monotone<SHARDS>> {
     /// Buffers an addition of `value` locally.
     #[inline]
     pub fn add(&mut self, value: u64) {
@@ -248,7 +351,59 @@ impl<const SHARDS: usize> sealed::Batchable for Unsigned<SHARDS> {
     }
 }
 
+impl<const SHARDS: usize> sealed::CounterBatchable for Unsigned<SHARDS> {
+    type RawAcc = u64;
+    const EMPTY_RAW: u64 = 0;
+
+    #[inline]
+    fn has_pending_raw(acc: &u64) -> bool {
+        *acc != 0
+    }
+
+    #[inline]
+    fn flush_raw_at_rev_rank(&self, rev_rank: usize, acc: &mut u64) {
+        let delta = *acc;
+        if delta != 0 {
+            self.add_at_rev_rank(rev_rank, delta);
+            *acc = 0;
+        }
+    }
+}
+
 impl<const SHARDS: usize> Local<'_, Unsigned<SHARDS>> {
+    /// Buffers an addition of `value` locally (using wrapping 64-bit arithmetic).
+    #[inline]
+    pub fn add(&mut self, value: u64) {
+        self.acc = self.acc.wrapping_add(value);
+    }
+
+    /// Buffers a subtraction of `value` locally (using wrapping 64-bit arithmetic).
+    #[inline]
+    pub fn sub(&mut self, value: u64) {
+        self.acc = self.acc.wrapping_sub(value);
+    }
+
+    /// Buffers an increment of `1` locally.
+    #[inline]
+    pub fn incr(&mut self) {
+        self.add(1);
+    }
+
+    /// Buffers a decrement of `1` locally.
+    #[inline]
+    pub fn decr(&mut self) {
+        self.sub(1);
+    }
+
+    /// Returns the currently buffered wrapping 64-bit delta.
+    #[must_use]
+    #[inline]
+    pub const fn pending(&self) -> u64 {
+        self.acc
+    }
+}
+
+impl<const SHARDS: usize> LocalField<Unsigned<SHARDS>> {
     /// Buffers an addition of `value` locally (using wrapping 64-bit arithmetic).
     #[inline]
     pub fn add(&mut self, value: u64) {
@@ -313,7 +468,59 @@ impl<const SHARDS: usize> sealed::Batchable for Signed<SHARDS> {
     }
 }
 
+impl<const SHARDS: usize> sealed::CounterBatchable for Signed<SHARDS> {
+    type RawAcc = i64;
+    const EMPTY_RAW: i64 = 0;
+
+    #[inline]
+    fn has_pending_raw(acc: &i64) -> bool {
+        *acc != 0
+    }
+
+    #[inline]
+    fn flush_raw_at_rev_rank(&self, rev_rank: usize, acc: &mut i64) {
+        let delta = *acc;
+        if delta != 0 {
+            self.add_at_rev_rank(rev_rank, delta);
+            *acc = 0;
+        }
+    }
+}
+
 impl<const SHARDS: usize> Local<'_, Signed<SHARDS>> {
+    /// Buffers a signed addition of `value` locally (using wrapping 64-bit arithmetic).
+    #[inline]
+    pub fn add(&mut self, value: i64) {
+        self.acc = self.acc.wrapping_add(value);
+    }
+
+    /// Buffers a signed subtraction of `value` locally (using wrapping 64-bit arithmetic).
+    #[inline]
+    pub fn sub(&mut self, value: i64) {
+        self.acc = self.acc.wrapping_sub(value);
+    }
+
+    /// Buffers an increment of `1` locally.
+    #[inline]
+    pub fn incr(&mut self) {
+        self.add(1);
+    }
+
+    /// Buffers a decrement of `1` locally.
+    #[inline]
+    pub fn decr(&mut self) {
+        self.sub(1);
+    }
+
+    /// Returns the currently buffered signed delta.
+    #[must_use]
+    #[inline]
+    pub const fn pending(&self) -> i64 {
+        self.acc
+    }
+}
+
+impl<const SHARDS: usize> LocalField<Signed<SHARDS>> {
     /// Buffers a signed addition of `value` locally (using wrapping 64-bit arithmetic).
     #[inline]
     pub fn add(&mut self, value: i64) {
@@ -378,7 +585,44 @@ impl<const SHARDS: usize> sealed::Batchable for Minimum<SHARDS> {
     }
 }
 
+impl<const SHARDS: usize> sealed::CounterBatchable for Minimum<SHARDS> {
+    type RawAcc = u64;
+    const EMPTY_RAW: u64 = minimum::UNOBSERVED;
+
+    #[inline]
+    fn has_pending_raw(acc: &u64) -> bool {
+        *acc != minimum::UNOBSERVED
+    }
+
+    #[inline]
+    fn flush_raw_at_rev_rank(&self, rev_rank: usize, acc: &mut u64) {
+        let encoded = *acc;
+        if encoded != minimum::UNOBSERVED {
+            self.observe_encoded_at_rev_rank(rev_rank, encoded);
+            *acc = minimum::UNOBSERVED;
+        }
+    }
+}
+
 impl<const SHARDS: usize> Local<'_, Minimum<SHARDS>> {
+    /// Observes `value` locally, updating the buffered batch minimum without atomic ops.
+    #[inline]
+    pub fn observe(&mut self, value: u64) {
+        let encoded = Minimum::<SHARDS>::encode(value);
+        if encoded < self.acc {
+            self.acc = encoded;
+        }
+    }
+
+    /// Returns the buffered minimum observed since the last flush, or `None` if unobserved.
+    #[must_use]
+    #[inline]
+    pub const fn pending(&self) -> Option<u64> {
+        Minimum::<SHARDS>::decode(self.acc)
+    }
+}
+
+impl<const SHARDS: usize> LocalField<Minimum<SHARDS>> {
     /// Observes `value` locally, updating the buffered batch minimum without atomic ops.
     #[inline]
     pub fn observe(&mut self, value: u64) {
@@ -428,7 +672,44 @@ impl<const SHARDS: usize> sealed::Batchable for Maximum<SHARDS> {
     }
 }
 
+impl<const SHARDS: usize> sealed::CounterBatchable for Maximum<SHARDS> {
+    type RawAcc = u64;
+    const EMPTY_RAW: u64 = maximum::UNOBSERVED;
+
+    #[inline]
+    fn has_pending_raw(acc: &u64) -> bool {
+        *acc != maximum::UNOBSERVED
+    }
+
+    #[inline]
+    fn flush_raw_at_rev_rank(&self, rev_rank: usize, acc: &mut u64) {
+        let encoded = *acc;
+        if encoded != maximum::UNOBSERVED {
+            self.observe_encoded_at_rev_rank(rev_rank, encoded);
+            *acc = maximum::UNOBSERVED;
+        }
+    }
+}
+
 impl<const SHARDS: usize> Local<'_, Maximum<SHARDS>> {
+    /// Observes `value` locally, updating the buffered batch maximum without atomic ops.
+    #[inline]
+    pub fn observe(&mut self, value: u64) {
+        let encoded = Maximum::<SHARDS>::encode(value);
+        if encoded > self.acc {
+            self.acc = encoded;
+        }
+    }
+
+    /// Returns the buffered maximum observed since the last flush, or `None` if unobserved.
+    #[must_use]
+    #[inline]
+    pub const fn pending(&self) -> Option<u64> {
+        Maximum::<SHARDS>::decode(self.acc)
+    }
+}
+
+impl<const SHARDS: usize> LocalField<Maximum<SHARDS>> {
     /// Observes `value` locally, updating the buffered batch maximum without atomic ops.
     #[inline]
     pub fn observe(&mut self, value: u64) {
@@ -478,7 +759,73 @@ impl<const SHARDS: usize> sealed::Batchable for Average<SHARDS> {
     }
 }
 
+impl<const SHARDS: usize> sealed::CounterBatchable for Average<SHARDS> {
+    type RawAcc = (u64, u64);
+    const EMPTY_RAW: (u64, u64) = (0, 0);
+
+    #[inline]
+    fn has_pending_raw(acc: &(u64, u64)) -> bool {
+        acc.0 != 0 || acc.1 != 0
+    }
+
+    #[inline]
+    fn flush_raw_at_rev_rank(&self, rev_rank: usize, acc: &mut (u64, u64)) {
+        let (sum, count) = *acc;
+        if sum != 0 || count != 0 {
+            self.observe_many_at_rev_rank(rev_rank, sum, count);
+            *acc = (0, 0);
+        }
+    }
+}
+
 impl<const SHARDS: usize> Local<'_, Average<SHARDS>> {
+    /// Observes a single sample `value` locally (`sum += value`, `count += 1`).
+    #[inline]
+    pub fn observe(&mut self, value: u64) {
+        self.acc.0 = self.acc.0.wrapping_add(value);
+        self.acc.1 = self.acc.1.wrapping_add(1);
+    }
+
+    /// Observes a pre-aggregated batch `(sum, count)` locally.
+    #[inline]
+    pub fn observe_many(&mut self, sum: u64, count: u64) {
+        self.acc.0 = self.acc.0.wrapping_add(sum);
+        self.acc.1 = self.acc.1.wrapping_add(count);
+    }
+
+    /// Buffers an addition to the sum without changing the count.
+    #[inline]
+    pub fn add_sum(&mut self, value: u64) {
+        self.acc.0 = self.acc.0.wrapping_add(value);
+    }
+
+    /// Buffers an addition to the count without changing the sum.
+    #[inline]
+    pub fn add_count(&mut self, value: u64) {
+        self.acc.1 = self.acc.1.wrapping_add(value);
+    }
+
+    /// Buffers an increment of `1` to the count without changing the sum.
+    #[inline]
+    pub fn incr(&mut self) {
+        self.add_count(1);
+    }
+
+    /// Buffers a wrapping decrement of `1` to the count without changing the sum.
+    #[inline]
+    pub fn decr(&mut self) {
+        self.acc.1 = self.acc.1.wrapping_sub(1);
+    }
+
+    /// Returns the buffered `(sum, count)` tuple awaiting flush.
+    #[must_use]
+    #[inline]
+    pub const fn pending(&self) -> (u64, u64) {
+        self.acc
+    }
+}
+
+impl<const SHARDS: usize> LocalField<Average<SHARDS>> {
     /// Observes a single sample `value` locally (`sum += value`, `count += 1`).
     #[inline]
     pub fn observe(&mut self, value: u64) {
@@ -557,7 +904,47 @@ impl<const SHARDS: usize> sealed::Batchable for Rate<SHARDS> {
     }
 }
 
+impl<const SHARDS: usize> sealed::CounterBatchable for Rate<SHARDS> {
+    type RawAcc = u64;
+    const EMPTY_RAW: u64 = 0;
+
+    #[inline]
+    fn has_pending_raw(acc: &u64) -> bool {
+        *acc != 0
+    }
+
+    #[inline]
+    fn flush_raw_at_rev_rank(&self, rev_rank: usize, acc: &mut u64) {
+        let delta = *acc;
+        if delta != 0 {
+            self.add_at_rev_rank(rev_rank, delta);
+            *acc = 0;
+        }
+    }
+}
+
 impl<const SHARDS: usize> Local<'_, Rate<SHARDS>> {
+    /// Buffers an addition of `value` locally.
+    #[inline]
+    pub fn add(&mut self, value: u64) {
+        self.acc = self.acc.wrapping_add(value);
+    }
+
+    /// Buffers an increment of `1` locally.
+    #[inline]
+    pub fn incr(&mut self) {
+        self.add(1);
+    }
+
+    /// Returns the currently buffered unflushed delta.
+    #[must_use]
+    #[inline]
+    pub const fn pending(&self) -> u64 {
+        self.acc
+    }
+}
+
+impl<const SHARDS: usize> LocalField<Rate<SHARDS>> {
     /// Buffers an addition of `value` locally.
     #[inline]
     pub fn add(&mut self, value: u64) {
@@ -721,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn test_labeled_group_local_proxy() {
+    fn test_labeled_group_local_proxy_is_compact() {
         labeled_group!(
             ProtoStats,
             "packets_by_proto",
@@ -732,6 +1119,11 @@ mod tests {
         );
 
         assert_send_sync::<Local<'static, ProtoStats>>();
+        // 1 group reference (usize) + 3 compact u64 accumulators = 32 bytes on 64-bit!
+        assert_eq!(
+            std::mem::size_of::<Local<'static, ProtoStats>>(),
+            std::mem::size_of::<usize>() + 3 * std::mem::size_of::<u64>()
+        );
 
         let stats = ProtoStats::new();
         {

@@ -8,7 +8,8 @@ use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::counters::{
-    CachePadded, CounterValue, DEFAULT_SHARDS, Observable, sealed, thread_slot_index,
+    CachePadded, CounterValue, DEFAULT_SHARDS, Observable, sealed, slot_from_rev_rank,
+    thread_slot_index,
 };
 
 #[repr(C)]
@@ -93,6 +94,13 @@ impl<const SHARDS: usize> Average<SHARDS> {
         let slot = self.local_slot();
         slot.sum.fetch_add(value, Ordering::Relaxed);
         slot.count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn observe_many_at_rev_rank(&self, rev_rank: usize, sum: u64, count: u64) {
+        let slot = &self.components[slot_from_rev_rank::<SHARDS>(rev_rank)];
+        slot.sum.fetch_add(sum, Ordering::Relaxed);
+        slot.count.fetch_add(count, Ordering::Relaxed);
     }
 
     /// Observes a pre-aggregated batch of values (`sum += sum`, `count += count`).

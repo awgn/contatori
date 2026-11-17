@@ -279,9 +279,9 @@ macro_rules! labeled_group {
         }
 
         const _: () = {
-            #[derive(::core::fmt::Debug)]
-            pub struct LocalFields<'a> {
-                $( pub $field: $crate::adapters::Local<'a, $ty>, )+
+            #[derive(::core::fmt::Debug, ::core::clone::Clone, ::core::marker::Copy)]
+            pub struct LocalFields {
+                $( pub $field: $crate::adapters::LocalField<$ty>, )+
             }
 
             #[allow(dead_code)]
@@ -298,7 +298,7 @@ macro_rules! labeled_group {
                     $crate::adapters::Local::__from_parts(
                         self,
                         LocalFields {
-                            $( $field: self.$field.local(), )+
+                            $( $field: $crate::adapters::LocalField::new(), )+
                         },
                     )
                 }
@@ -306,14 +306,14 @@ macro_rules! labeled_group {
 
             impl $crate::counters::sealed::Batchable for $name {
                 type Acc<'a>
-                    = LocalFields<'a>
+                    = LocalFields
                 where
                     Self: 'a;
 
                 #[inline]
                 fn new_acc(&self) -> Self::Acc<'_> {
                     LocalFields {
-                        $( $field: $crate::adapters::Batchable::local(&self.$field), )+
+                        $( $field: $crate::adapters::LocalField::new(), )+
                     }
                 }
 
@@ -324,7 +324,10 @@ macro_rules! labeled_group {
 
                 #[inline]
                 fn flush_acc(&self, acc: &mut Self::Acc<'_>) {
-                    $( acc.$field.flush(); )+
+                    if Self::has_pending_acc(acc) {
+                        let rev_rank = $crate::counters::__thread_raw_rev_rank();
+                        $( acc.$field.__flush_into(&self.$field, rev_rank); )+
+                    }
                 }
 
                 #[inline]

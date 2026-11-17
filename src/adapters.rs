@@ -10,5 +10,5 @@ mod group;
 pub mod local;
 mod resettable;
 
-pub use local::{Batchable, Local};
+pub use local::{Batchable, Local, LocalField};
 pub use resettable::Resettable;

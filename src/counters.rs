@@ -193,6 +193,13 @@ pub(crate) fn thread_raw_rev_rank() -> usize {
     })
 }
 
+/// Hidden macro entry point used by `labeled_group!` to resolve TLS once per group flush.
+#[doc(hidden)]
+#[inline]
+pub fn __thread_raw_rev_rank() -> usize {
+    thread_raw_rev_rank()
+}
+
 /// Maps a bit-reversed thread rank into `[0, SHARDS)` via a single shift.
 ///
 /// Using the top `log2(SHARDS)` bits of `rank.reverse_bits()` forms a Van der Corput
@@ -571,6 +578,23 @@ pub mod sealed {
     /// Marker subtrait for [`labeled_group!`](crate::labeled_group) structs whose
     /// [`Local`](crate::adapters::Local) wrapper dereferences to per-label local proxies.
     pub trait BatchableGroup: Batchable {}
+
+    /// Internal trait for primitive counters so [`labeled_group!`](crate::labeled_group)
+    /// can store compact, pointer-free, `Drop`-free field accumulators and flush an entire
+    /// group with a single TLS lookup.
+    pub trait CounterBatchable: Batchable {
+        /// Plain value accumulator without lifetime or counter reference.
+        type RawAcc: Copy + std::fmt::Debug + Send + Sync;
+
+        /// Neutral empty accumulator state.
+        const EMPTY_RAW: Self::RawAcc;
+
+        /// Returns `true` if `acc` contains unflushed updates.
+        fn has_pending_raw(acc: &Self::RawAcc) -> bool;
+
+        /// Flushes `acc` into the shard selected by `rev_rank` and resets `acc` to `EMPTY_RAW`.
+        fn flush_raw_at_rev_rank(&self, rev_rank: usize, acc: &mut Self::RawAcc);
+    }
 }
 
 #[cfg(test)]
