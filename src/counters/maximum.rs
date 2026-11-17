@@ -93,17 +93,8 @@ impl<const SHARDS: usize> Maximum<SHARDS> {
     #[inline]
     pub(crate) fn observe_encoded(&self, encoded: u64) {
         let counter = self.local_slot();
-        let mut current = counter.load(Ordering::Relaxed);
-        while encoded > current {
-            match counter.compare_exchange_weak(
-                current,
-                encoded,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(actual) => current = actual,
-            }
+        if encoded > counter.load(Ordering::Relaxed) {
+            counter.fetch_max(encoded, Ordering::Relaxed);
         }
     }
 
@@ -151,14 +142,16 @@ impl<const SHARDS: usize> Maximum<SHARDS> {
         Self::decode(raw)
     }
 
-    /// Returns the global maximum across all shards and resets every shard to unobserved.
+    /// Returns the global maximum across all shards and resets observed shards to unobserved.
     #[inline]
     pub fn get_and_reset(&self) -> Option<u64> {
         let mut max = UNOBSERVED;
         for counter in &self.components {
-            let val = counter.swap(UNOBSERVED, Ordering::Relaxed);
-            if val > max {
-                max = val;
+            if counter.load(Ordering::Relaxed) != UNOBSERVED {
+                let val = counter.swap(UNOBSERVED, Ordering::Relaxed);
+                if val > max {
+                    max = val;
+                }
             }
         }
         Self::decode(max)

@@ -128,7 +128,13 @@ impl<const SHARDS: usize> Signed<SHARDS> {
     fn total_value_and_reset(&self) -> i64 {
         self.components
             .iter()
-            .map(|counter| counter.swap(0, Ordering::Relaxed))
+            .map(|counter| {
+                if counter.load(Ordering::Relaxed) != 0 {
+                    counter.swap(0, Ordering::Relaxed)
+                } else {
+                    0
+                }
+            })
             .fold(0i64, i64::wrapping_add)
     }
 }

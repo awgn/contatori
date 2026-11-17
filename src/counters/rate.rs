@@ -178,11 +178,10 @@ impl<const SHARDS: usize> Rate<SHARDS> {
     pub fn rate(&self) -> f64 {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        let current_value = self.total_value();
 
         let Some(last_time) = state.last_instant else {
             state.last_instant = Some(now);
-            state.last_value = current_value;
+            state.last_value = self.total_value();
             return 0.0;
         };
 
@@ -191,6 +190,7 @@ impl<const SHARDS: usize> Rate<SHARDS> {
             return state.ewma_rate;
         }
 
+        let current_value = self.total_value();
         let elapsed_secs = elapsed.as_secs_f64();
         let delta = current_value.wrapping_sub(state.last_value);
         let instant_rate = delta as f64 / elapsed_secs;

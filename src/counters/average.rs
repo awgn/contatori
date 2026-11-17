@@ -174,8 +174,12 @@ impl<const SHARDS: usize> Average<SHARDS> {
         let mut sum: u128 = 0;
         let mut count: u64 = 0;
         for c in &self.components {
-            sum += u128::from(c.sum.swap(0, Ordering::Relaxed));
-            count = count.wrapping_add(c.count.swap(0, Ordering::Relaxed));
+            if c.sum.load(Ordering::Relaxed) != 0 {
+                sum += u128::from(c.sum.swap(0, Ordering::Relaxed));
+            }
+            if c.count.load(Ordering::Relaxed) != 0 {
+                count = count.wrapping_add(c.count.swap(0, Ordering::Relaxed));
+            }
         }
         (sum, count)
     }

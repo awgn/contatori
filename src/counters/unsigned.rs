@@ -137,12 +137,18 @@ impl<const SHARDS: usize> Unsigned<SHARDS> {
             .fold(0u64, u64::wrapping_add)
     }
 
-    /// Computes the total value and resets all shards to zero.
+    /// Computes the total value and resets non-zero shards to zero.
     #[inline]
     fn total_value_and_reset(&self) -> u64 {
         self.components
             .iter()
-            .map(|counter| counter.swap(0, Ordering::Relaxed))
+            .map(|counter| {
+                if counter.load(Ordering::Relaxed) != 0 {
+                    counter.swap(0, Ordering::Relaxed)
+                } else {
+                    0
+                }
+            })
             .fold(0u64, u64::wrapping_add)
     }
 }
