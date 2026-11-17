@@ -2,7 +2,7 @@
 
 High-performance sharded atomic counters for Rust.
 
-`contatori` provides thread-safe, ultra-fast counters and statistical trackers optimized for highly concurrent workloads. It implements a **sharded counter pattern** that eliminates cache-line contention compared to traditional single atomic counters.
+`contatori` provides thread-safe, ultra-fast counters and statistical trackers optimized for highly concurrent workloads, with **zero required external dependencies**. It implements a **sharded counter pattern** that eliminates cache-line contention compared to traditional single atomic counters.
 
 ## The Problem
 
@@ -12,8 +12,8 @@ In multi-threaded applications, updating a single shared atomic variable from ma
 
 `contatori` distributes each counter across multiple cache-line-padded shards (`64` by default, configurable via const generics `SHARDS`):
 
-1. **Per-Thread Sharding**: Each thread caches a monotonically assigned ID in a `const`-initialized `thread_local!` `Cell` and indexes its shard via `id & (SHARDS - 1)`.
-2. **Cache-Line Padding**: Every shard is wrapped in a 128-byte aligned `CachePadded` slot (256-byte on `s390x`) to prevent both direct and prefetcher-induced **false sharing**.
+1. **Recycled & Scattered Per-Thread Sharding**: Each live thread claims the lowest available rank (released automatically on thread exit to prevent collisions under thread churn) and caches `rank.reverse_bits()` in a `const`-initialized `thread_local!` `Cell`, mapping into `[0, SHARDS)` via a single shift (Van der Corput permutation) to maximally separate active cores across cache lines.
+2. **Cache-Line Padding & `#[repr(C)]` Layout**: Every shard is wrapped in a 128-byte aligned `CachePadded` slot (256-byte on `s390x`) starting at offset `0` to prevent both direct and L2 spatial-prefetcher **false sharing**.
 3. **Relaxed Atomic Ordering**: Hot-path updates use `Ordering::Relaxed` (single atomic instruction, zero locks, zero syscalls).
 4. **Aggregation on Read**: Global values are computed only when observed, trading slightly more work on cold reads for massive throughput on hot writes.
 
@@ -63,15 +63,15 @@ Benchmarked with 8 persistent worker threads (`8 threads × 100,000 increments`)
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  Labeled counters (rotating GET/POST/PUT/DELETE):                           │
 │  OpenTelemetry Counter  ████████████████████████████████████████  280.64 ms │
-│  cont. labeled_group!   ▍                                         0.166 ms  │
+│  cont. labeled_group!   ▍                                         0.154 ms  │
 │  Local<Group> (b256)    ▏                                         0.120 ms  │
-│  Speedup: ~1,691x (sharded) / ~2,330x (Local batch, 6.64 Gelem/s)           │
+│  Speedup: ~1,827x (sharded, 5.21 Gelem/s) / ~2,335x (Local, 6.66 Gelem/s)   │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  High contention (all threads same label):                                  │
 │  OpenTelemetry Counter  ████████████████████████████████████████  281.48 ms │
-│  cont. labeled_group!   ▍                                         0.226 ms  │
+│  cont. labeled_group!   ▍                                         0.216 ms  │
 │  Local<Group> (b256)    ▏                                         0.022 ms  │
-│  Speedup: ~1,245x (sharded) / ~13,087x (Local batch, 37.20 Gelem/s)         │
+│  Speedup: ~1,304x (sharded, 3.71 Gelem/s) / ~13,087x (Local, 37.20 Gelem/s) │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -91,7 +91,7 @@ Benchmarked with 8 persistent worker threads (`8 threads × 100,000 increments`)
 
 ```toml
 [dependencies]
-contatori = "0.9"
+contatori = "0.10"
 ```
 
 ### Basic Usage
